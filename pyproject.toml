@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gridfinity-pic-to-bin"
+version = "0.1.0"
+description = "Generate 3D-printable gridfinity bins from phone photos with ArUco template"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics",
+    "opencv-python",
+    "numpy",
+    "svgpathtools",
+    "ezdxf",
+    "pyclipper",
+    "matplotlib",
+    "potracer",
+    "pillow-heif",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+pic-to-bin = "pic_to_bin.pipeline:main"
+generate-phone-template = "pic_to_bin.phone_template:main"
+preprocess-phone = "pic_to_bin.phone_preprocess:main"
+trace-tool = "pic_to_bin.trace_tool:main"
+validate-trace = "pic_to_bin.validate_trace:main"
+layout-tools = "pic_to_bin.layout_tools:main"
+prepare-bin = "pic_to_bin.prepare_bin:main"
+pic-to-bin-fusion = "pic_to_bin.fusion_install:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pic_to_bin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
