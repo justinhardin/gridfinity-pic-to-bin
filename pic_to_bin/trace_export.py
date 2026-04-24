@@ -58,34 +58,42 @@ def _potrace_curves_to_polygons(path, scale: float,
 
     Each curve in the potrace path becomes a polygon (list of (x, y) points).
     Bezier curves are sampled into line segments for polygon representation.
+
+    The Y axis is flipped from image convention (Y-down) to CAD convention
+    (Y-up), so that the output orientation matches the input photo when
+    viewed in Y-up CAD tools (DXF viewers, Fusion 360, matplotlib).
     """
     polygons = []
+
+    # Y-flip: image_h * scale - y, so top-of-photo ends up at high Y in CAD.
+    h_mm = img_shape[0] * scale if img_shape else 0.0
+    fy = (lambda y: h_mm - y) if img_shape else (lambda y: y)
 
     curves = _filter_curves(path, img_shape) if img_shape else path
     for curve in curves:
         points = []
         start_x = curve.start_point.x * scale
-        start_y = curve.start_point.y * scale
+        start_y = fy(curve.start_point.y * scale)
         points.append((start_x, start_y))
 
         for segment in curve:
             if segment.is_corner:
                 # Corner: two line segments via a corner point
                 cx = segment.c.x * scale
-                cy = segment.c.y * scale
+                cy = fy(segment.c.y * scale)
                 ex = segment.end_point.x * scale
-                ey = segment.end_point.y * scale
+                ey = fy(segment.end_point.y * scale)
                 points.append((cx, cy))
                 points.append((ex, ey))
             else:
                 # Bezier curve: cubic bezier from current point through c1, c2 to end
                 x0, y0 = points[-1]
                 c1x = segment.c1.x * scale
-                c1y = segment.c1.y * scale
+                c1y = fy(segment.c1.y * scale)
                 c2x = segment.c2.x * scale
-                c2y = segment.c2.y * scale
+                c2y = fy(segment.c2.y * scale)
                 ex = segment.end_point.x * scale
-                ey = segment.end_point.y * scale
+                ey = fy(segment.end_point.y * scale)
 
                 # Sample the bezier curve
                 n_samples = 10
@@ -565,16 +573,23 @@ def _potrace_bezier_to_svg_paths(path, scale: float,
     Uses potrace's native curve representation (compact, accurate) rather than
     sampling into polygon points.
 
+    The Y axis is flipped from image convention (Y-down) to CAD convention
+    (Y-up), matching _potrace_curves_to_polygons so the output orientation
+    matches the input photo in Y-up viewers.
+
     Returns:
         (svg_paths, all_points) where all_points is a flat list of (x, y) for bbox.
     """
     svg_paths = []
     all_points = []
 
+    h_mm = img_shape[0] * scale if img_shape else 0.0
+    fy = (lambda y: h_mm - y) if img_shape else (lambda y: y)
+
     curves = _filter_curves(path, img_shape) if img_shape else path
     for curve in curves:
         start_x = curve.start_point.x * scale
-        start_y = curve.start_point.y * scale
+        start_y = fy(curve.start_point.y * scale)
         all_points.append((start_x, start_y))
 
         d = f"M {start_x:.3f},{start_y:.3f}"
@@ -582,18 +597,18 @@ def _potrace_bezier_to_svg_paths(path, scale: float,
         for segment in curve:
             if segment.is_corner:
                 cx = segment.c.x * scale
-                cy = segment.c.y * scale
+                cy = fy(segment.c.y * scale)
                 ex = segment.end_point.x * scale
-                ey = segment.end_point.y * scale
+                ey = fy(segment.end_point.y * scale)
                 d += f" L {cx:.3f},{cy:.3f} L {ex:.3f},{ey:.3f}"
                 all_points.extend([(cx, cy), (ex, ey)])
             else:
                 c1x = segment.c1.x * scale
-                c1y = segment.c1.y * scale
+                c1y = fy(segment.c1.y * scale)
                 c2x = segment.c2.x * scale
-                c2y = segment.c2.y * scale
+                c2y = fy(segment.c2.y * scale)
                 ex = segment.end_point.x * scale
-                ey = segment.end_point.y * scale
+                ey = fy(segment.end_point.y * scale)
                 d += f" C {c1x:.3f},{c1y:.3f} {c2x:.3f},{c2y:.3f} {ex:.3f},{ey:.3f}"
                 all_points.extend([(c1x, c1y), (c2x, c2y), (ex, ey)])
 
@@ -675,6 +690,10 @@ def _write_svg(inner_paths: list[str], outer_paths: list[str],
 
     Fusion 360 interprets SVG viewBox coordinates as cm (its native unit).
     All coordinates are converted from mm to cm so Fusion imports at correct scale.
+
+    Path data is in Y-up (CAD) convention; SVG viewBox is Y-down. We apply a
+    scale(1, -1) in the group transform so the shape renders right-side-up in
+    browsers and matches the photo orientation.
     """
     margin_mm = 2
     # Convert everything to cm for Fusion 360 compatibility
@@ -682,8 +701,10 @@ def _write_svg(inner_paths: list[str], outer_paths: list[str],
     margin = margin_mm * MM_TO_CM
     width = bbox["width_mm"] * MM_TO_CM + 2 * margin
     height = bbox["height_mm"] * MM_TO_CM + 2 * margin
+    # With scale(1,-1): y_svg = tY - y_data. Choose tY so y_data=max_y maps to margin
+    # and y_data=min_y maps to height-margin.
     offset_x = -bbox["min_x"] * MM_TO_CM + margin
-    offset_y = -bbox["min_y"] * MM_TO_CM + margin
+    offset_y = bbox["max_y"] * MM_TO_CM + margin
 
     # Scale all path coordinates from mm to cm
     scaled_inner = [_scale_svg_path_coords(d, MM_TO_CM) for d in inner_paths]
@@ -694,7 +715,7 @@ def _write_svg(inner_paths: list[str], outer_paths: list[str],
 <svg xmlns="http://www.w3.org/2000/svg"
      width="{width:.4f}cm" height="{height:.4f}cm"
      viewBox="0 0 {width:.4f} {height:.4f}">
-  <g transform="translate({offset_x:.4f},{offset_y:.4f})">
+  <g transform="translate({offset_x:.4f},{offset_y:.4f}) scale(1,-1)">
 '''
 
     # Inner paths (tool cutout) - solid stroke

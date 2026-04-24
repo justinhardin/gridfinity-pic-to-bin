@@ -101,7 +101,7 @@ required:
 
 optional:
   --paper-size {a4,letter,legal}  Template paper size (default: letter)
-  --tolerance MM                  Tolerance offset added around trace, mm (default: 1.5)
+  --tolerance MM                  Tolerance offset added around trace, mm (default: 0.8)
   --gap MM                        Minimum gap between tools in layout, mm (default: 3.0)
   --max-units N                   Max gridfinity grid size per axis (default: 7)
   --height-units N                Force bin height in gridfinity units (default: auto)

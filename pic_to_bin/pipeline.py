@@ -103,8 +103,8 @@ examples:
         "--paper-size", choices=["a4", "letter", "legal"], default="letter",
         help="Template paper size used for photos (default: letter)")
     parser.add_argument(
-        "--tolerance", type=float, default=1.5,
-        help="Tolerance outline offset in mm (default: 1.5)")
+        "--tolerance", type=float, default=0.8,
+        help="Tolerance outline offset in mm (default: 0.8)")
     parser.add_argument(
         "--gap", type=float, default=3.0,
         help="Minimum gap between tools in mm (default: 3.0)")
@@ -126,6 +126,10 @@ examples:
     parser.add_argument(
         "--max-concavity-depth", type=float, default=3.0,
         help="Maximum acceptable concavity depth loss in mm (default: 3.0)")
+    parser.add_argument(
+        "--mask-erode", type=float, default=0.3,
+        help="Post-SAM mask erosion in mm to counter shadow halos (default: 0.3, "
+             "0 to disable). Increase if handles still read wide.")
     parser.add_argument(
         "--sam-model", type=str, default="sam2.1_l.pt",
         help="SAM2 model weights (default: sam2.1_l.pt)")
@@ -190,6 +194,7 @@ examples:
                     max_iterations=args.max_refine_iterations,
                     max_concavity_depth_mm=args.max_concavity_depth,
                     sam_model=args.sam_model,
+                    mask_erode_mm=args.mask_erode,
                 )
                 dxf_paths.append(result["dxf_path"])
                 iters = result.get("refinement_iterations", 1)

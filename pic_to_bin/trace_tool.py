@@ -483,11 +483,54 @@ def _fill_mask_holes(mask: np.ndarray) -> np.ndarray:
     return filled
 
 
-def cleanup_mask(mask: np.ndarray, kernel_size: int = 5,
-                 smooth_radius: int = 7, shadow_kernel_size: int = 21,
-                 contour_smooth_sigma: float = 5.0,
-                 notch_fill_kernel_size: int = 19) -> np.ndarray:
+def erode_mask_mm(mask: np.ndarray, amount_mm: float, dpi: float) -> np.ndarray:
+    """Shrink a binary mask inward by amount_mm on every edge.
+
+    Counters SAM2's tendency to include soft shadow/out-of-focus pixels at
+    tool edges — on phone photos this adds ~0.3-1mm per edge, making
+    handles read noticeably wider than the physical part. Applied once
+    between segmentation and cleanup.
+    """
+    if amount_mm <= 0:
+        return mask
+    radius_px = max(1, round(amount_mm * dpi / 25.4))
+    ksize = 2 * radius_px + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    return cv2.erode(mask, kernel, iterations=1)
+
+
+def _mm_to_odd_px(mm_value: float, dpi: float) -> int:
+    """Convert mm to an odd pixel count. Returns 0 when mm_value <= 0.
+
+    cv2 structuring-element kernels must be odd-sized so the kernel has a
+    well-defined center pixel.
+    """
+    if mm_value <= 0:
+        return 0
+    px = max(1, round(mm_value * dpi / 25.4))
+    if px % 2 == 0:
+        px += 1
+    return px
+
+
+def _mm_to_px(mm_value: float, dpi: float) -> int:
+    """Convert mm to a non-negative integer pixel count."""
+    if mm_value <= 0:
+        return 0
+    return max(1, round(mm_value * dpi / 25.4))
+
+
+def cleanup_mask(mask: np.ndarray, dpi: float,
+                 kernel_mm: float = 0.9,
+                 smooth_radius_mm: float = 0.9,
+                 shadow_kernel_mm: float = 0.0,
+                 contour_smooth_sigma_mm: float = 0.6,
+                 notch_fill_mm: float = 2.4) -> np.ndarray:
     """Clean up the binary mask with morphological operations.
+
+    All feature sizes are expressed in mm and converted to pixels using
+    ``dpi`` so cleanup behaves consistently whether the input is a 200 DPI
+    scanner or a ~130 DPI phone photo.
 
     Pipeline:
     0. Hole fill: fill internal background regions enclosed by foreground
@@ -503,21 +546,24 @@ def cleanup_mask(mask: np.ndarray, kernel_size: int = 5,
           protrusions caused by scanner shadows
     4. Smooth: Gaussian blur for clean 3D-printable outlines
     """
+    kernel_px = _mm_to_odd_px(kernel_mm, dpi)
+    smooth_radius_px = _mm_to_px(smooth_radius_mm, dpi)
+    shadow_kernel_px = _mm_to_odd_px(shadow_kernel_mm, dpi)
+    notch_fill_px = _mm_to_odd_px(notch_fill_mm, dpi)
+    contour_sigma_px = contour_smooth_sigma_mm * dpi / 25.4
+
     # Step 0: Fill internal holes — enclosed background regions become
     # foreground.  Gaps connected to the image border (e.g. handle gap) are
     # kept.  This prevents noisy masks from fragmenting during the
     # morphological open in step 2.
     mask = _fill_mask_holes(mask)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-
-    # Step 1: Close small gaps — merge fine textures (knurling, jaw teeth)
-    # iterations=1 bridges gaps up to ~kernel_size pixels (~0.9mm at 200 DPI).
-    # Higher iterations bridge wider gaps and can fill narrow handle gaps.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    # Step 2: Remove noise specks
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    if kernel_px >= 3:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_px, kernel_px))
+        # Step 1: Close small gaps — merge fine textures (knurling, jaw teeth)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        # Step 2: Remove noise specks
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
     # Step 3: Keep only the largest external contour.
     # Use CHAIN_APPROX_NONE so every boundary pixel is present — needed for
@@ -527,8 +573,8 @@ def cleanup_mask(mask: np.ndarray, kernel_size: int = 5,
         largest = max(contours, key=cv2.contourArea)
 
         # Step 3.25: Smooth contour coordinates to remove localised outward bumps.
-        if contour_smooth_sigma > 0:
-            largest = _smooth_contour_coords(largest, contour_smooth_sigma)
+        if contour_sigma_px > 0.5:
+            largest = _smooth_contour_coords(largest, contour_sigma_px)
 
         mask_clean = np.zeros_like(mask)
         cv2.drawContours(mask_clean, [largest], -1, 255, cv2.FILLED)
@@ -538,24 +584,25 @@ def cleanup_mask(mask: np.ndarray, kernel_size: int = 5,
     # Dilate then erode: fills inward concavities caused by shadows at pivot
     # slots / adjustment mechanisms. The handle gap (much wider than the kernel)
     # is unaffected; small shadow notches are bridged closed.
-    if notch_fill_kernel_size > 1:
+    if notch_fill_px >= 3:
         notch_k = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (notch_fill_kernel_size, notch_fill_kernel_size)
+            cv2.MORPH_ELLIPSE, (notch_fill_px, notch_fill_px)
         )
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, notch_k, iterations=1)
 
     # Step 3.75: Shadow suppression — open with a larger kernel to remove
     # outward protrusions caused by scanner shadows along handle edges.
-    if shadow_kernel_size > 1:
+    if shadow_kernel_px >= 3:
         shadow_k = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (shadow_kernel_size, shadow_kernel_size)
+            cv2.MORPH_ELLIPSE, (shadow_kernel_px, shadow_kernel_px)
         )
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, shadow_k, iterations=1)
 
     # Step 4: Smooth edges for clean, 3D-printable outlines
-    blur_size = smooth_radius * 2 + 1  # must be odd
-    mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-    _, mask = cv2.threshold(mask, 128, 255, cv2.THRESH_BINARY)
+    if smooth_radius_px >= 1:
+        blur_size = smooth_radius_px * 2 + 1  # must be odd
+        mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+        _, mask = cv2.threshold(mask, 128, 255, cv2.THRESH_BINARY)
 
     print(f"  Cleaned mask: tool pixels: {np.count_nonzero(mask)}")
     return mask
@@ -674,15 +721,15 @@ def trace_from_mask(
     stem: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 1.5,
+    tolerance_mm: float = 0.8,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
-    kernel_size: int = 7,
-    smooth_radius: int = 7,
-    shadow_kernel_size: int = 0,
-    contour_smooth_sigma: float = 5.0,
-    notch_fill_kernel_size: int = 19,
+    kernel_mm: float = 0.9,
+    smooth_radius_mm: float = 0.9,
+    shadow_kernel_mm: float = 0.0,
+    contour_smooth_sigma_mm: float = 0.6,
+    notch_fill_mm: float = 2.4,
     straighten_threshold: float = 45.0,
     output_dir: str = "generated",
 ) -> dict:
@@ -695,17 +742,17 @@ def trace_from_mask(
     Args:
         raw_mask: Binary mask (uint8, 0 or 255) from segment_tool()
         stem: Base filename for outputs (e.g. 'cobra_350')
-        dpi: Scanner DPI (for pixel-to-mm conversion)
+        dpi: Scanner/photo DPI (for mm-to-pixel conversion)
         clearance_mm: Offset to add around the trace for printing tolerance
         tolerance_mm: Additional offset beyond clearance for smoothed outer perimeter
         alphamax: potrace corner sensitivity
         turdsize: potrace minimum feature size
         opttolerance: potrace curve optimization tolerance
-        kernel_size: Morphological kernel size for texture/noise cleanup
-        smooth_radius: Gaussian blur radius for edge smoothing
-        shadow_kernel_size: Kernel size for shadow suppression open (pixels)
-        contour_smooth_sigma: Gaussian sigma for contour-coordinate smoothing
-        notch_fill_kernel_size: Kernel size for notch-fill close
+        kernel_mm: Morphological kernel size (mm) for texture/noise cleanup
+        smooth_radius_mm: Gaussian blur radius (mm) for edge smoothing
+        shadow_kernel_mm: Kernel size (mm) for shadow suppression open (0 disables)
+        contour_smooth_sigma_mm: Gaussian sigma (mm) for contour smoothing
+        notch_fill_mm: Kernel size (mm) for notch-fill close
         straighten_threshold: Max degrees to auto-straighten (0 to disable)
         output_dir: Output directory
 
@@ -718,11 +765,12 @@ def trace_from_mask(
 
     # Cleanup
     print("  Mask cleanup...")
-    mask = cleanup_mask(raw_mask.copy(), kernel_size=kernel_size,
-                        smooth_radius=smooth_radius,
-                        shadow_kernel_size=shadow_kernel_size,
-                        contour_smooth_sigma=contour_smooth_sigma,
-                        notch_fill_kernel_size=notch_fill_kernel_size)
+    mask = cleanup_mask(raw_mask.copy(), dpi=dpi,
+                        kernel_mm=kernel_mm,
+                        smooth_radius_mm=smooth_radius_mm,
+                        shadow_kernel_mm=shadow_kernel_mm,
+                        contour_smooth_sigma_mm=contour_smooth_sigma_mm,
+                        notch_fill_mm=notch_fill_mm)
 
     # Auto-straighten
     if straighten_threshold > 0:
@@ -780,15 +828,16 @@ def trace_tool(
     image_path: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 1.5,
+    tolerance_mm: float = 0.8,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
-    kernel_size: int = 7,
-    smooth_radius: int = 7,
-    shadow_kernel_size: int = 0,
-    contour_smooth_sigma: float = 5.0,
-    notch_fill_kernel_size: int = 19,
+    kernel_mm: float = 0.9,
+    smooth_radius_mm: float = 0.9,
+    shadow_kernel_mm: float = 0.0,
+    contour_smooth_sigma_mm: float = 0.6,
+    notch_fill_mm: float = 2.4,
+    mask_erode_mm: float = 0.3,
     straighten_threshold: float = 45.0,
     output_dir: str = None,
     sam_model: str = "sam2.1_l.pt",
@@ -800,17 +849,19 @@ def trace_tool(
 
     Args:
         image_path: Path to flatbed scanner image
-        dpi: Scanner DPI (for pixel-to-mm conversion)
+        dpi: Scanner/photo DPI (for mm-to-pixel conversion)
         clearance_mm: Offset to add around the trace for printing tolerance
         tolerance_mm: Additional offset beyond clearance for a smoothed outer perimeter
         alphamax: potrace corner sensitivity
         turdsize: potrace minimum feature size
         opttolerance: potrace curve optimization tolerance
-        kernel_size: Morphological kernel size for texture/noise cleanup
-        smooth_radius: Gaussian blur radius for edge smoothing
-        shadow_kernel_size: Kernel size for shadow suppression open (pixels)
-        contour_smooth_sigma: Gaussian sigma for contour-coordinate smoothing
-        notch_fill_kernel_size: Kernel size for notch-fill close
+        kernel_mm: Morphological kernel size (mm) for texture/noise cleanup
+        smooth_radius_mm: Gaussian blur radius (mm) for edge smoothing
+        shadow_kernel_mm: Kernel size (mm) for shadow suppression open (0 disables)
+        contour_smooth_sigma_mm: Gaussian sigma (mm) for contour smoothing
+        notch_fill_mm: Kernel size (mm) for notch-fill close
+        mask_erode_mm: Post-segmentation inward erosion (mm) to counter SAM's
+            shadow-halo bias on phone photos (default 0.3)
         straighten_threshold: Max degrees to auto-straighten (0 to disable)
         output_dir: Output directory (defaults to generated/<stem>)
         sam_model: SAM2 model weight name (default: sam2.1_l.pt)
@@ -836,16 +887,21 @@ def trace_tool(
     raw_mask_path = output_dir / f"{stem}_raw_mask.png"
     cv2.imwrite(str(raw_mask_path), raw_mask)
 
+    # Post-SAM erosion: counter shadow-halo / soft-edge bias
+    if mask_erode_mm > 0:
+        print(f"  Post-SAM erosion: {mask_erode_mm:.2f}mm")
+        raw_mask = erode_mask_mm(raw_mask, mask_erode_mm, dpi)
+
     # Steps 2-6: Cleanup → Straighten → Vectorize → Export
     print("Steps 2-6: Cleanup -> Export...")
     result = trace_from_mask(
         raw_mask, stem, dpi=dpi,
         clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
         alphamax=alphamax, turdsize=turdsize, opttolerance=opttolerance,
-        kernel_size=kernel_size, smooth_radius=smooth_radius,
-        shadow_kernel_size=shadow_kernel_size,
-        contour_smooth_sigma=contour_smooth_sigma,
-        notch_fill_kernel_size=notch_fill_kernel_size,
+        kernel_mm=kernel_mm, smooth_radius_mm=smooth_radius_mm,
+        shadow_kernel_mm=shadow_kernel_mm,
+        contour_smooth_sigma_mm=contour_smooth_sigma_mm,
+        notch_fill_mm=notch_fill_mm,
         straighten_threshold=straighten_threshold,
         output_dir=str(output_dir),
     )
@@ -893,30 +949,34 @@ def main():
                         help="Scanner DPI (default: 200)")
     parser.add_argument("--clearance", type=float, default=0.0,
                         help="Clearance offset in mm applied to inner outline (default: 0)")
-    parser.add_argument("--tolerance", type=float, default=1.5,
-                        help="Tolerance perimeter offset in mm beyond inner outline (default: 1.5)")
+    parser.add_argument("--tolerance", type=float, default=0.8,
+                        help="Tolerance perimeter offset in mm beyond inner outline (default: 0.8)")
     parser.add_argument("--alphamax", type=float, default=1.2,
                         help="potrace corner sensitivity 0-1.34 (default: 1.2)")
     parser.add_argument("--turdsize", type=int, default=50,
                         help="potrace min feature size in pixels (default: 50)")
     parser.add_argument("--opttolerance", type=float, default=2.0,
                         help="potrace curve optimization tolerance (default: 0.8)")
-    parser.add_argument("--kernel-size", type=int, default=7,
-                        help="Morphological kernel size for mask cleanup (default: 7)")
-    parser.add_argument("--smooth-radius", type=int, default=7,
-                        help="Gaussian blur radius for edge smoothing (default: 6)")
-    parser.add_argument("--contour-smooth", type=float, default=5.0,
-                        help="Gaussian sigma for contour-coordinate smoothing (pixels, "
-                             "default: 15). Removes localised bumps from shadows / "
-                             "pivot geometry. At 200 DPI, sigma=15 ≈ 1.9 mm. Set to 0 to disable.")
-    parser.add_argument("--notch-fill", type=int, default=19,
-                        help="Kernel size for notch-fill close (pixels, default: 35). "
+    parser.add_argument("--kernel-mm", type=float, default=0.9,
+                        help="Morphological kernel size for mask cleanup in mm "
+                             "(default: 0.9). Set to 0 to disable.")
+    parser.add_argument("--smooth-radius-mm", type=float, default=0.9,
+                        help="Gaussian blur radius for edge smoothing in mm (default: 0.9)")
+    parser.add_argument("--contour-smooth-mm", type=float, default=0.6,
+                        help="Gaussian sigma for contour-coordinate smoothing in mm "
+                             "(default: 0.6). Removes localised bumps from shadows / "
+                             "pivot geometry. Set to 0 to disable.")
+    parser.add_argument("--notch-fill-mm", type=float, default=2.4,
+                        help="Kernel size for notch-fill close in mm (default: 2.4). "
                              "Fills inward shadow concavities (pivot slots, adjustment "
-                             "mechanisms). At 200 DPI, 35 px ≈ 4.4 mm. Set to 0 to disable.")
-    parser.add_argument("--shadow-kernel", type=int, default=0,
-                        help="Kernel size for shadow suppression (pixels, default: 13). "
-                             "Removes thin protrusions from scanner shadows. "
-                             "At 200 DPI, 13 px ≈ 1.65 mm. Set to 0 to disable.")
+                             "mechanisms). Set to 0 to disable.")
+    parser.add_argument("--shadow-kernel-mm", type=float, default=0.0,
+                        help="Kernel size for shadow suppression in mm (default: 0.0, "
+                             "disabled). Removes thin protrusions from shadows.")
+    parser.add_argument("--mask-erode-mm", type=float, default=0.3,
+                        help="Post-segmentation mask erosion in mm (default: 0.3). "
+                             "Counters SAM's tendency to include shadow halos at edges. "
+                             "Set to 0 to disable.")
     parser.add_argument("--straighten-threshold", type=float, default=45.0,
                         help="Max degrees to auto-straighten scanned tools (default: 45). "
                              "Snaps the tool's principal axis to nearest 90°. "
@@ -943,11 +1003,12 @@ def main():
                 alphamax=args.alphamax,
                 turdsize=args.turdsize,
                 opttolerance=args.opttolerance,
-                kernel_size=args.kernel_size,
-                smooth_radius=args.smooth_radius,
-                shadow_kernel_size=args.shadow_kernel,
-                contour_smooth_sigma=args.contour_smooth,
-                notch_fill_kernel_size=args.notch_fill,
+                kernel_mm=args.kernel_mm,
+                smooth_radius_mm=args.smooth_radius_mm,
+                shadow_kernel_mm=args.shadow_kernel_mm,
+                contour_smooth_sigma_mm=args.contour_smooth_mm,
+                notch_fill_mm=args.notch_fill_mm,
+                mask_erode_mm=args.mask_erode_mm,
                 straighten_threshold=args.straighten_threshold,
                 output_dir=args.output_dir,
                 sam_model=args.sam_model,

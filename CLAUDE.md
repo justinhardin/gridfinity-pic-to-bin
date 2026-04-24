@@ -147,7 +147,7 @@ Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `
 ## Technical Notes
 
 - **ArUco dictionary**: `DICT_4X4_50` — 4x4 bit grid, 50 unique markers. Simple and robust for large printed markers.
-- **Scale accuracy**: Sub-pixel ArUco corners give ~0.1px precision. Over 160mm marker span, scale error is <0.5mm — well within 1.5mm tolerance.
+- **Scale accuracy**: Sub-pixel ArUco corners give ~0.1px precision. Over 160mm marker span, scale error is <0.5mm — within the 0.8mm default tolerance.
 - **Homography safety**: RANSAC rejects outlier corners from wrinkled paper or partially occluded markers. 8 markers give up to 32 point pairs for a 4-DOF homography.
 - **White border fill**: Warped image uses white border (`borderValue=255,255,255`) so areas outside the template appear as white background, which SAM2 handles correctly.
 - **Effective DPI**: Computed from the homography inverse — how many pixels per mm at the template center. Typically 100-250 for phone photos.

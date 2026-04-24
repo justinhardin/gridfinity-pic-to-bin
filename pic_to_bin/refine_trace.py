@@ -16,7 +16,10 @@ import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pic_to_bin.trace_tool import segment_tool, cleanup_mask, trace_from_mask, _fill_mask_holes
+from pic_to_bin.trace_tool import (
+    segment_tool, cleanup_mask, trace_from_mask, _fill_mask_holes,
+    erode_mask_mm,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,27 +28,27 @@ from pic_to_bin.trace_tool import segment_tool, cleanup_mask, trace_from_mask, _
 
 @dataclass
 class CleanupParams:
-    """Mutable cleanup parameter set for iterative refinement."""
-    kernel_size: int = 7
-    smooth_radius: int = 7
-    shadow_kernel_size: int = 0
-    contour_smooth_sigma: float = 5.0
-    notch_fill_kernel_size: int = 19
+    """Mutable cleanup parameter set for iterative refinement. All in mm."""
+    kernel_mm: float = 0.9
+    smooth_radius_mm: float = 0.9
+    shadow_kernel_mm: float = 0.0
+    contour_smooth_sigma_mm: float = 0.6
+    notch_fill_mm: float = 2.4
 
     def to_dict(self) -> dict:
         return {
-            "kernel_size": self.kernel_size,
-            "smooth_radius": self.smooth_radius,
-            "shadow_kernel_size": self.shadow_kernel_size,
-            "contour_smooth_sigma": self.contour_smooth_sigma,
-            "notch_fill_kernel_size": self.notch_fill_kernel_size,
+            "kernel_mm": self.kernel_mm,
+            "smooth_radius_mm": self.smooth_radius_mm,
+            "shadow_kernel_mm": self.shadow_kernel_mm,
+            "contour_smooth_sigma_mm": self.contour_smooth_sigma_mm,
+            "notch_fill_mm": self.notch_fill_mm,
         }
 
     def summary(self) -> str:
-        return (f"notch_fill={self.notch_fill_kernel_size}, "
-                f"contour_smooth={self.contour_smooth_sigma:.1f}, "
-                f"kernel={self.kernel_size}, "
-                f"smooth_r={self.smooth_radius}")
+        return (f"notch_fill={self.notch_fill_mm:.2f}mm, "
+                f"contour_smooth={self.contour_smooth_sigma_mm:.2f}mm, "
+                f"kernel={self.kernel_mm:.2f}mm, "
+                f"smooth_r={self.smooth_radius_mm:.2f}mm")
 
 
 # ---------------------------------------------------------------------------
@@ -197,60 +200,61 @@ def generate_comparison_image(raw_mask: np.ndarray, cleaned_mask: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def _reduce_params(params: CleanupParams) -> CleanupParams:
-    """Reduce cleanup aggressiveness by one step.
+    """Reduce cleanup aggressiveness by one step. All values in mm.
 
     Priority order (reduces one param per call):
-    1. notch_fill_kernel_size: 19 -> 9 -> 5 -> 3 (halve, keep odd, floor=3)
-    2. contour_smooth_sigma: 5.0 -> 3.0 -> 1.8 -> 1.1 (x0.6, floor=1.0)
-    3. kernel_size: 7 -> 5 -> 3 (-2, floor=3)
-    4. smooth_radius: 7 -> 5 -> 3 (-2, floor=3)
+    1. notch_fill_mm: halve (2.4 -> 1.2 -> 0.6 -> 0.4, floor 0.4mm)
+    2. contour_smooth_sigma_mm: x0.6 (0.6 -> 0.36 -> 0.22 -> 0.13, floor 0.13mm, disable below)
+    3. kernel_mm: halve (0.9 -> 0.45, floor 0.4mm)
+    4. smooth_radius_mm: halve (0.9 -> 0.45, floor 0.4mm)
 
     Returns a new CleanupParams, or the same object if nothing can be reduced.
     """
+    FLOOR_MM = 0.4
+    SIGMA_FLOOR_MM = 0.13
+
     # Priority 1: Reduce notch_fill (primary concavity filler)
-    if params.notch_fill_kernel_size > 3:
-        new_nf = max(3, params.notch_fill_kernel_size // 2)
-        if new_nf % 2 == 0:
-            new_nf -= 1
+    if params.notch_fill_mm > FLOOR_MM + 1e-6:
+        new_nf = max(FLOOR_MM, round(params.notch_fill_mm / 2, 2))
         return CleanupParams(
-            kernel_size=params.kernel_size,
-            smooth_radius=params.smooth_radius,
-            shadow_kernel_size=params.shadow_kernel_size,
-            contour_smooth_sigma=params.contour_smooth_sigma,
-            notch_fill_kernel_size=new_nf,
+            kernel_mm=params.kernel_mm,
+            smooth_radius_mm=params.smooth_radius_mm,
+            shadow_kernel_mm=params.shadow_kernel_mm,
+            contour_smooth_sigma_mm=params.contour_smooth_sigma_mm,
+            notch_fill_mm=new_nf,
         )
 
     # Priority 2: Reduce contour smoothing
-    if params.contour_smooth_sigma > 1.0:
-        new_cs = round(params.contour_smooth_sigma * 0.6, 1)
-        if new_cs < 1.0:
+    if params.contour_smooth_sigma_mm > SIGMA_FLOOR_MM + 1e-6:
+        new_cs = round(params.contour_smooth_sigma_mm * 0.6, 2)
+        if new_cs < SIGMA_FLOOR_MM:
             new_cs = 0.0  # disable entirely below floor
         return CleanupParams(
-            kernel_size=params.kernel_size,
-            smooth_radius=params.smooth_radius,
-            shadow_kernel_size=params.shadow_kernel_size,
-            contour_smooth_sigma=new_cs,
-            notch_fill_kernel_size=params.notch_fill_kernel_size,
+            kernel_mm=params.kernel_mm,
+            smooth_radius_mm=params.smooth_radius_mm,
+            shadow_kernel_mm=params.shadow_kernel_mm,
+            contour_smooth_sigma_mm=new_cs,
+            notch_fill_mm=params.notch_fill_mm,
         )
 
-    # Priority 3: Reduce kernel_size
-    if params.kernel_size > 3:
+    # Priority 3: Reduce kernel_mm
+    if params.kernel_mm > FLOOR_MM + 1e-6:
         return CleanupParams(
-            kernel_size=max(3, params.kernel_size - 2),
-            smooth_radius=params.smooth_radius,
-            shadow_kernel_size=params.shadow_kernel_size,
-            contour_smooth_sigma=params.contour_smooth_sigma,
-            notch_fill_kernel_size=params.notch_fill_kernel_size,
+            kernel_mm=max(FLOOR_MM, round(params.kernel_mm / 2, 2)),
+            smooth_radius_mm=params.smooth_radius_mm,
+            shadow_kernel_mm=params.shadow_kernel_mm,
+            contour_smooth_sigma_mm=params.contour_smooth_sigma_mm,
+            notch_fill_mm=params.notch_fill_mm,
         )
 
-    # Priority 4: Reduce smooth_radius
-    if params.smooth_radius > 3:
+    # Priority 4: Reduce smooth_radius_mm
+    if params.smooth_radius_mm > FLOOR_MM + 1e-6:
         return CleanupParams(
-            kernel_size=params.kernel_size,
-            smooth_radius=max(3, params.smooth_radius - 2),
-            shadow_kernel_size=params.shadow_kernel_size,
-            contour_smooth_sigma=params.contour_smooth_sigma,
-            notch_fill_kernel_size=params.notch_fill_kernel_size,
+            kernel_mm=params.kernel_mm,
+            smooth_radius_mm=max(FLOOR_MM, round(params.smooth_radius_mm / 2, 2)),
+            shadow_kernel_mm=params.shadow_kernel_mm,
+            contour_smooth_sigma_mm=params.contour_smooth_sigma_mm,
+            notch_fill_mm=params.notch_fill_mm,
         )
 
     # Nothing left to reduce — return same object to signal convergence
@@ -265,7 +269,7 @@ def refine_trace(
     image_path: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 1.5,
+    tolerance_mm: float = 0.8,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -274,6 +278,7 @@ def refine_trace(
     max_iterations: int = 5,
     max_concavity_depth_mm: float = 3.0,
     sam_model: str = "sam2.1_l.pt",
+    mask_erode_mm: float = 0.3,
 ) -> dict:
     """Run trace_tool iteratively, adjusting cleanup params to preserve concavities.
 
@@ -312,9 +317,16 @@ def refine_trace(
     print("Step 1: Segmentation...")
     raw_mask = segment_tool(str(image_path), sam_model=sam_model)
 
-    # Save raw mask
+    # Save raw mask (original, pre-erosion — useful for debugging)
     raw_mask_path = output_dir / f"{stem}_raw_mask.png"
     cv2.imwrite(str(raw_mask_path), raw_mask)
+
+    # Post-SAM erosion: counter shadow-halo / soft-edge bias. Applied once so
+    # every subsequent step (iteration loop + final export) sees the corrected
+    # mask, and the concavity comparison baseline stays consistent.
+    if mask_erode_mm > 0:
+        print(f"  Post-SAM erosion: {mask_erode_mm:.2f}mm")
+        raw_mask = erode_mask_mm(raw_mask, mask_erode_mm, dpi)
 
     # Pre-fill holes in the raw mask so comparison only measures cleanup
     # distortion, not the intentional hole-filling that cleanup_mask applies.
@@ -330,7 +342,7 @@ def refine_trace(
         print(f"  Params: {params.summary()}")
 
         # Run cleanup (no straighten yet — compare at same dimensions as raw)
-        cleaned = cleanup_mask(raw_mask.copy(), **params.to_dict())
+        cleaned = cleanup_mask(raw_mask.copy(), dpi=dpi, **params.to_dict())
 
         # Compare against hole-filled raw mask so that intentional hole
         # filling doesn't register as distortion
