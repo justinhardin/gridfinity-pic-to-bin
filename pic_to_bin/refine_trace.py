@@ -269,7 +269,7 @@ def refine_trace(
     image_path: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 0.8,
+    tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,

@@ -234,6 +234,40 @@ def _eliminate_thin_walls(polys_mm: list, bin_width_mm: float,
 SLOT_INSET_MM = 4.0  # slot cutouts stop this far inside the bin edge
 
 
+def _center_tools_in_bin(tools: list, bin_width_mm: float,
+                         bin_height_mm: float) -> None:
+    """Shift every tool's polys so the combined (inner + tolerance + slot)
+    bbox sits in the middle of the bin.
+
+    Layout packing places tools against the (0, 0) corner; rounding the bin
+    up to whole gridfinity units leaves uneven slack on the high-x/high-y
+    sides. This redistributes the slack evenly so the cutout — including
+    the finger slot — is centered. Mutates `tools` in place.
+    """
+    all_polys = []
+    for tool in tools:
+        all_polys.extend(tool.get("inner_polys_mm", []))
+        all_polys.extend(tool.get("tolerance_polys_mm", []))
+        all_polys.extend(tool.get("slot_polys_mm", []))
+    if not all_polys:
+        return
+
+    bbox = _compute_bbox(all_polys)
+    dx = (bin_width_mm - bbox["width_mm"]) / 2.0 - bbox["min_x"]
+    dy = (bin_height_mm - bbox["height_mm"]) / 2.0 - bbox["min_y"]
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return
+
+    def shift(polys):
+        return [[[x + dx, y + dy] for x, y in p] for p in polys]
+
+    for tool in tools:
+        tool["inner_polys_mm"] = shift(tool.get("inner_polys_mm", []))
+        tool["tolerance_polys_mm"] = shift(
+            tool.get("tolerance_polys_mm", []))
+        tool["slot_polys_mm"] = shift(tool.get("slot_polys_mm", []))
+
+
 def _clip_to_bin_boundary(polys_mm: list, bin_width_mm: float,
                           bin_height_mm: float,
                           inset_mm: float = SLOT_INSET_MM) -> list:
@@ -327,6 +361,11 @@ def build_config(layout: dict, tool_heights: dict | float,
     # for finger access while the lower half is buried in the pocket.
     deck_top_z = FLOOR_MIN_MM + max(tool_height_values) / 2.0
     deck_lowering = max(0.0, bin_d - deck_top_z)
+
+    # Center the cutout (inner + tolerance + slot) in the bin before
+    # thin-wall and slot-clip snapping use the final positions.
+    _center_tools_in_bin(tools, bin_params["bin_width_mm"],
+                         bin_params["bin_height_mm"])
 
     # Build tool entries
     tool_entries = []

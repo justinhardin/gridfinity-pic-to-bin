@@ -631,9 +631,11 @@ def potrace_to_svg(path, output_path: str, scale: float,
                    slot_polygon: list = None) -> dict:
     """Export potrace path to SVG, optionally with a tolerance outline.
 
-    When tolerance_mm > 0, two outlines are written:
+    When tolerance_mm is non-zero, two outlines are written:
     - Inner: the accurate tool trace (native Bezier curves when clearance=0)
-    - Outer: a smoothed tolerance perimeter, tolerance_mm beyond the inner outline
+    - Outer: a smoothed tolerance perimeter, tolerance_mm beyond the inner outline.
+            Positive values expand the perimeter (clearance fit); negative
+            values shrink it (interference fit).
 
     Args:
         path: potrace.Path object
@@ -660,21 +662,22 @@ def potrace_to_svg(path, output_path: str, scale: float,
         inner_svg_paths, all_points = _potrace_bezier_to_svg_paths(path, scale, img_shape)
         bbox_polygons = [all_points]
 
-    # Build outer tolerance paths
-    outer_svg_paths = []
-    if tolerance_mm > 0.001:
-        # Need polygon representation for offset operation
-        if clearance_mm > 0.001:
-            base_polygons = inner_polygons
-        else:
-            base_polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
+    # Build outer tolerance paths. Always generated (even at offset 0) so
+    # the Fusion cut consumes a Douglas-Peucker-simplified polygon — falling
+    # back to the raw potrace inner would give hundreds of points and freeze
+    # Fusion. _offset_polygons no-ops at offset 0; positive expands, negative
+    # shrinks.
+    if clearance_mm > 0.001:
+        base_polygons = inner_polygons
+    else:
+        base_polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
 
-        outer_polygons = _offset_polygons(base_polygons, tolerance_mm)
-        outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
-                          for p in outer_polygons]
-        outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]
-        outer_svg_paths = _polygons_to_svg_paths(outer_polygons)
-        bbox_polygons.extend(outer_polygons)
+    outer_polygons = _offset_polygons(base_polygons, tolerance_mm)
+    outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
+                      for p in outer_polygons]
+    outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]
+    outer_svg_paths = _polygons_to_svg_paths(outer_polygons)
+    bbox_polygons.extend(outer_polygons)
 
     # Finger access slot
     slot_svg_paths = []
@@ -775,8 +778,10 @@ def potrace_to_dxf(path, output_path: str, scale: float,
                    slot_polygon: list = None):
     """Export potrace path to DXF format, optionally with a tolerance outline.
 
-    When tolerance_mm > 0, the inner (tool cutout) outline stays on the default
-    layer "0", and the tolerance perimeter is placed on a "TOLERANCE" layer.
+    When tolerance_mm is non-zero, the inner (tool cutout) outline stays on
+    the default layer "0", and the tolerance perimeter is placed on a
+    "TOLERANCE" layer. Positive values expand the perimeter (clearance fit);
+    negative values shrink it (interference fit).
 
     Args:
         path: potrace.Path object
@@ -807,19 +812,22 @@ def potrace_to_dxf(path, output_path: str, scale: float,
         closed_poly = list(poly) + [poly[0]]
         msp.add_lwpolyline(closed_poly, close=True)
 
-    # Outer tolerance outline on separate layer
-    if tolerance_mm > 0.001:
-        doc.layers.add("TOLERANCE", color=3)  # green for visual distinction
-        outer_polygons = _offset_polygons(inner_polygons, tolerance_mm)
-        outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
-                          for p in outer_polygons]
-        outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]
-        for poly in outer_polygons:
-            if len(poly) < 3:
-                continue
-            closed_poly = list(poly) + [poly[0]]
-            msp.add_lwpolyline(closed_poly, close=True,
-                               dxfattribs={"layer": "TOLERANCE"})
+    # Outer tolerance outline on separate layer. Always generated (even at
+    # offset 0) so prepare_bin → Fusion get a Douglas-Peucker-simplified
+    # polygon to cut against — falling back to the raw potrace inner would
+    # give hundreds of points and freeze Fusion. _offset_polygons no-ops at
+    # offset 0; positive expands the pocket, negative shrinks it.
+    doc.layers.add("TOLERANCE", color=3)  # green for visual distinction
+    outer_polygons = _offset_polygons(inner_polygons, tolerance_mm)
+    outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
+                      for p in outer_polygons]
+    outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]
+    for poly in outer_polygons:
+        if len(poly) < 3:
+            continue
+        closed_poly = list(poly) + [poly[0]]
+        msp.add_lwpolyline(closed_poly, close=True,
+                           dxfattribs={"layer": "TOLERANCE"})
 
     # Finger access slot on separate layer
     if slot_polygon is not None:

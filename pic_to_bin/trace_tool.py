@@ -721,7 +721,7 @@ def trace_from_mask(
     stem: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 0.8,
+    tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -828,7 +828,7 @@ def trace_tool(
     image_path: str,
     dpi: int = 200,
     clearance_mm: float = 0.0,
-    tolerance_mm: float = 0.8,
+    tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -949,8 +949,9 @@ def main():
                         help="Scanner DPI (default: 200)")
     parser.add_argument("--clearance", type=float, default=0.0,
                         help="Clearance offset in mm applied to inner outline (default: 0)")
-    parser.add_argument("--tolerance", type=float, default=0.8,
-                        help="Tolerance perimeter offset in mm beyond inner outline (default: 0.8)")
+    parser.add_argument("--tolerance", type=float, default=0.0,
+                        help="Tolerance perimeter offset in mm beyond inner outline (default: 0). "
+                             "Positive expands the pocket; negative shrinks it.")
     parser.add_argument("--alphamax", type=float, default=1.2,
                         help="potrace corner sensitivity 0-1.34 (default: 1.2)")
     parser.add_argument("--turdsize", type=int, default=50,

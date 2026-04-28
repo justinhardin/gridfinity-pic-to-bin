@@ -103,8 +103,9 @@ examples:
         "--paper-size", choices=["a4", "letter", "legal"], default="letter",
         help="Template paper size used for photos (default: letter)")
     parser.add_argument(
-        "--tolerance", type=float, default=0.8,
-        help="Tolerance outline offset in mm (default: 0.8)")
+        "--tolerance", type=float, default=0.0,
+        help="Tolerance outline offset in mm (default: 0). Positive "
+             "expands the pocket past the trace; negative shrinks it.")
     parser.add_argument(
         "--gap", type=float, default=3.0,
         help="Minimum gap between tools in mm (default: 3.0)")
