@@ -1,4 +1,4 @@
-"""Install or uninstall the Fusion 360 pic-to-bin script."""
+"""Install or uninstall the Fusion 360 pic-to-bin script and add-in."""
 
 import argparse
 import os
@@ -8,17 +8,20 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-SCRIPT_NAME = "pic_to_bin"
+NAME = "pic_to_bin"
 
 
-def _fusion_scripts_dir() -> Path:
-    """Return the Fusion 360 Scripts directory for the current OS."""
+def _fusion_api_dir() -> Path:
+    """Return the Fusion 360 API directory for the current OS.
+
+    Scripts live in <api>/Scripts and add-ins live in <api>/AddIns.
+    """
     system = platform.system()
     if system == "Windows":
         appdata = os.environ.get("APPDATA", "")
         if not appdata:
             raise RuntimeError("APPDATA environment variable not set")
-        return Path(appdata) / "Autodesk" / "Autodesk Fusion 360" / "API" / "Scripts"
+        return Path(appdata) / "Autodesk" / "Autodesk Fusion 360" / "API"
     elif system == "Darwin":
         return (
             Path.home()
@@ -27,109 +30,128 @@ def _fusion_scripts_dir() -> Path:
             / "Autodesk"
             / "Autodesk Fusion 360"
             / "API"
-            / "Scripts"
         )
     else:
-        raise RuntimeError(f"Unsupported OS: {system}. Fusion 360 runs on Windows and macOS only.")
+        raise RuntimeError(
+            f"Unsupported OS: {system}. Fusion 360 runs on Windows and macOS only.")
 
 
-def _bundled_script_dir() -> Path:
-    """Return the path to the bundled pic_to_bin_script directory."""
-    pkg = resources.files("pic_to_bin") / "pic_to_bin_script"
-    # resources.files returns a Traversable; for installed packages this is
-    # typically a real filesystem path.
+def _bundled_dir(name: str) -> Path:
+    """Return the path to a bundled folder inside the package."""
+    pkg = resources.files("pic_to_bin") / name
     path = Path(str(pkg))
     if not path.is_dir():
         raise RuntimeError(
-            f"Could not locate bundled pic_to_bin_script at {path}. "
-            "Is the package installed correctly?"
-        )
+            f"Could not locate bundled {name} at {path}. "
+            "Is the package installed correctly?")
     return path
 
 
-def install(target_dir: Path | None = None) -> Path:
-    """Copy the Fusion 360 script to the Fusion Scripts directory.
-
-    Returns the destination directory.
-    """
-    source = _bundled_script_dir()
-    dest_parent = target_dir or _fusion_scripts_dir()
-    dest = dest_parent / SCRIPT_NAME
-
-    if not dest_parent.exists():
-        print(f"Creating Fusion Scripts directory: {dest_parent}")
-        dest_parent.mkdir(parents=True, exist_ok=True)
-
+def _copy_tree(src: Path, dest: Path) -> None:
+    """Copy src into dest (replacing dest), excluding __pycache__."""
     if dest.exists():
         shutil.rmtree(dest)
-        print(f"Replaced existing script at: {dest}")
+    shutil.copytree(
+        src, dest,
+        ignore=shutil.ignore_patterns("__pycache__", ".vscode", ".*"))
+
+
+def install(target_api_dir: Path | None = None) -> dict:
+    """Install both the script and the add-in. Returns the destination paths."""
+    api_dir = target_api_dir or _fusion_api_dir()
+    scripts_root = api_dir / "Scripts"
+    addins_root = api_dir / "AddIns"
+    scripts_root.mkdir(parents=True, exist_ok=True)
+    addins_root.mkdir(parents=True, exist_ok=True)
+
+    src_script = _bundled_dir("pic_to_bin_script")
+    src_addin = _bundled_dir("pic_to_bin_addin")
+
+    script_dest = scripts_root / NAME
+    addin_dest = addins_root / NAME
+
+    # Script: copy the whole script folder (includes _bin_builder.py).
+    _copy_tree(src_script, script_dest)
+    print(f"Installed script: {script_dest}")
+
+    # Add-in: copy the addin folder, then copy _bin_builder.py from the
+    # script source so the add-in entry can import it locally.
+    _copy_tree(src_addin, addin_dest)
+    builder_src = src_script / "_bin_builder.py"
+    if builder_src.exists():
+        shutil.copy2(builder_src, addin_dest / "_bin_builder.py")
+    print(f"Installed add-in:  {addin_dest}")
+
+    return {"script": script_dest, "addin": addin_dest}
+
+
+def uninstall(target_api_dir: Path | None = None) -> dict:
+    api_dir = target_api_dir or _fusion_api_dir()
+    script_dest = api_dir / "Scripts" / NAME
+    addin_dest = api_dir / "AddIns" / NAME
+
+    found = {"script": False, "addin": False}
+    if script_dest.exists():
+        shutil.rmtree(script_dest)
+        print(f"Removed: {script_dest}")
+        found["script"] = True
     else:
-        print(f"Installing script to: {dest}")
-
-    # Copy only the script files (not __init__.py or __pycache__)
-    dest.mkdir(parents=True, exist_ok=True)
-    for filename in ("pic_to_bin.py", "pic_to_bin.manifest"):
-        src_file = source / filename
-        if src_file.exists():
-            shutil.copy2(src_file, dest / filename)
-
-    return dest
-
-
-def uninstall(target_dir: Path | None = None) -> bool:
-    """Remove the Fusion 360 script from the Fusion Scripts directory.
-
-    Returns True if the script was found and removed.
-    """
-    dest_parent = target_dir or _fusion_scripts_dir()
-    dest = dest_parent / SCRIPT_NAME
-
-    if dest.exists():
-        shutil.rmtree(dest)
-        print(f"Removed: {dest}")
-        return True
+        print(f"Not found: {script_dest}")
+    if addin_dest.exists():
+        shutil.rmtree(addin_dest)
+        print(f"Removed: {addin_dest}")
+        found["addin"] = True
     else:
-        print(f"Script not found at: {dest}")
-        return False
+        print(f"Not found: {addin_dest}")
+
+    return found
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="pic-to-bin-fusion",
-        description="Install or uninstall the Fusion 360 pic-to-bin script.",
+        description="Install or uninstall the Fusion 360 pic-to-bin "
+                    "script and add-in.",
     )
     parser.add_argument(
         "action",
         choices=["install", "uninstall"],
-        help="Install or uninstall the Fusion 360 script",
+        help="Install or uninstall both the script and the add-in",
     )
     parser.add_argument(
         "--target-dir",
         type=Path,
         default=None,
-        help="Override the Fusion 360 Scripts directory (advanced)",
+        help="Override the Fusion 360 API directory (advanced)",
     )
     args = parser.parse_args()
 
     try:
         if args.action == "install":
-            dest = install(args.target_dir)
+            paths = install(args.target_dir)
             print()
-            print("Success! To use the script in Fusion 360:")
-            print("  1. Open Fusion 360")
-            print("  2. Press Shift+S (Scripts and Add-Ins)")
-            print(f'  3. If not listed, click "+" and browse to:\n     {dest}')
-            print('  4. Select "pic_to_bin" and click Run')
+            print("Success! To use in Fusion 360:")
             print()
-            print("The script will prompt you to select bin_config.json via a file dialog.")
-            print("Tip: Your generated configs are typically in ./generated/bin_config.json")
+            print("  Add-in (toolbar button — recommended):")
+            print("    1. Open Fusion 360")
+            print("    2. Press Shift+S → Add-Ins tab")
+            print(f"    3. Select 'pic_to_bin' → Run")
+            print("       (toggle 'Run on Startup' so the button appears every session)")
+            print("    4. In a Design workspace, look in Solid > Create → "
+                  "'Gridfinity Pic-to-Bin'")
+            print()
+            print("  Script (alternate):")
+            print("    1. Press Shift+S → Scripts tab")
+            print("    2. Select 'pic_to_bin' → Run")
+            print()
+            print("Both pick up bin_config.json from <project>/generated/ "
+                  "automatically, falling back to a file dialog.")
         else:
             found = uninstall(args.target_dir)
-            if found:
-                print("Fusion 360 script uninstalled successfully.")
-            else:
-                print("Nothing to uninstall.")
+            if not (found["script"] or found["addin"]):
+                print("Nothing was installed; nothing to uninstall.")
                 sys.exit(1)
+            print("Uninstall complete.")
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -477,6 +477,12 @@ def compute_finger_slot(path, scale: float, clearance_mm: float = 0.0,
     run_start, run_end = best_run
     run_mid = (run_start + run_end) // 2
 
+    # Anchor placement at the global center along the principal axis, not at
+    # the middle of the narrow band — otherwise asymmetric tools (screwdriver,
+    # wrench) end up with the slot near the end where the narrow band lives.
+    axis_center = (p_min + p_max) / 2.0
+    center_idx = int(np.argmin(np.abs(positions - axis_center)))
+
     # --- Step 4–6: Place slot, trying positions from center of handle run outward ---
     bbox_tool = _compute_bbox([polygon])
     bin_w = math.ceil(bbox_tool['width_mm'] / gridfinity_unit)
@@ -499,10 +505,11 @@ def compute_finger_slot(path, scale: float, clearance_mm: float = 0.0,
     ideal_length = handle_total_w + 2 * ideal_overhang
     min_length = handle_total_w + 2 * min_overhang
 
-    # Try handle positions starting from center of run outward (most room)
+    # Try handle positions starting from the global tool center outward, so
+    # the slot lands as centered along the part as the narrow band allows.
     candidate_indices = sorted(
         range(run_start, run_end + 1),
-        key=lambda i: abs(i - run_mid)
+        key=lambda i: abs(i - center_idx)
     )
 
     slot_poly = None

@@ -275,7 +275,8 @@ def _clip_to_bin_boundary(polys_mm: list, bin_width_mm: float,
 # ---------------------------------------------------------------------------
 
 def build_config(layout: dict, tool_heights: dict | float,
-                 height_units: int = None) -> dict:
+                 height_units: int = None,
+                 stacking_lip: bool = True) -> dict:
     """Assemble the full JSON config for the Fusion 360 script.
 
     Args:
@@ -283,6 +284,8 @@ def build_config(layout: dict, tool_heights: dict | float,
         tool_heights: tool heights in mm — either a single float (uniform)
                       or a dict mapping tool index to height in mm.
         height_units: gridfinity height units (auto-calculated if None)
+        stacking_lip: if False, omit the stacking lip (shorter overall bin
+                      for shallow drawers). Pocket depth is unchanged.
     """
     grid_x = layout["grid_x"]
     grid_y = layout["grid_y"]
@@ -303,27 +306,27 @@ def build_config(layout: dict, tool_heights: dict | float,
         else:
             raise ValueError(f"Invalid tool_heights type: {type(tool_heights)}")
 
-    FLOOR_MIN_MM = 1.0  # minimum solid floor below pocket
+    FLOOR_MIN_MM = 1.0  # solid floor below pocket — pocket sits this low
 
-    # Auto-calculate height if not specified
+    # Auto-calculate height if not specified.
+    # Pocket sits as low as possible (1mm above bin floor), so the bin only
+    # needs to be tall enough to fit the tallest tool plus that 1mm floor,
+    # rounded up to the nearest gridfinity height unit.
     if height_units is None:
-        min_bin_heights = []
-        for th in tool_height_values:
-            pocket_floor = max(th / 2.0, FLOOR_MIN_MM)
-            min_bin_heights.append(pocket_floor + th)
-        height_units = max(1, math.ceil(max(min_bin_heights) / HEIGHT_UNIT_MM))
+        min_bin_height = max(tool_height_values) + FLOOR_MIN_MM
+        height_units = max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
 
     bin_params = compute_bin_params(grid_x, grid_y, height_units)
     bin_d = height_units * HEIGHT_UNIT_MM
 
-    # Compute pocket depths (distance from bin top down to pocket floor)
-    pocket_depths = []
-    for th in tool_height_values:
-        pocket_floor = max(th / 2.0, FLOOR_MIN_MM)
-        pocket_depths.append(bin_d - pocket_floor)
+    # Compute pocket depths (distance from bin top down to pocket floor at 1mm)
+    pocket_depths = [bin_d - FLOOR_MIN_MM for _ in tool_height_values]
 
-    # Deck lowering: position deck so tool midpoint aligns with deck surface
-    deck_lowering = max(0.0, bin_d - max(tool_height_values))
+    # Deck lowering: deck rises to half the tallest tool's height above the
+    # pocket floor — so the upper half of the tool stands proud of the deck
+    # for finger access while the lower half is buried in the pocket.
+    deck_top_z = FLOOR_MIN_MM + max(tool_height_values) / 2.0
+    deck_lowering = max(0.0, bin_d - deck_top_z)
 
     # Build tool entries
     tool_entries = []
@@ -346,6 +349,7 @@ def build_config(layout: dict, tool_heights: dict | float,
 
     config = {
         **bin_params,
+        "stacking_lip": bool(stacking_lip),
         "deck_lowering_mm": round(deck_lowering, 2),
         "deck_inset_mm": DECK_INSET_MM,
         "tools": tool_entries,
@@ -360,6 +364,7 @@ def build_config(layout: dict, tool_heights: dict | float,
 
 def prepare_bin(dxf_path: str, tool_heights: dict | float,
                 height_units: int = None,
+                stacking_lip: bool = True,
                 output_path: str = None) -> str:
     """Main pipeline: load layout DXF, compute params, write JSON config.
 
@@ -377,12 +382,14 @@ def prepare_bin(dxf_path: str, tool_heights: dict | float,
     config = build_config(
         layout, tool_heights,
         height_units=height_units,
+        stacking_lip=stacking_lip,
     )
 
     print(f"  Height: {config['height_units']} units "
           f"({config['bin_depth_mm']:.0f}mm)")
     print(f"  Bin: {config['bin_width_mm']:.0f}x{config['bin_height_mm']:.0f}mm "
           f"x {config['bin_depth_mm']:.0f}mm")
+    print(f"  Stacking lip: {'yes' if config['stacking_lip'] else 'no'}")
 
     for tool in config["tools"]:
         print(f"  {tool['name']}: height={tool['tool_height_mm']:.1f}mm, "
@@ -436,6 +443,10 @@ def main():
                              "--tool-height 1=20.0)")
     parser.add_argument("--height-units", type=int, default=None,
                         help="Bin height in gridfinity units (auto if omitted)")
+    parser.add_argument("--stacking", type=_parse_bool_arg, default=True,
+                        metavar="true|false",
+                        help="Generate stacking lip (default: true). Set "
+                             "false for shorter bins without the lip.")
     parser.add_argument("--output", type=str, default=None,
                         help="Output JSON path (default: generated/bin_config.json)")
 
@@ -447,8 +458,19 @@ def main():
         dxf_path=args.dxf_file,
         tool_heights=tool_heights,
         height_units=args.height_units,
+        stacking_lip=args.stacking,
         output_path=args.output,
     )
+
+
+def _parse_bool_arg(value: str) -> bool:
+    v = value.strip().lower()
+    if v in ("true", "1", "yes", "y"):
+        return True
+    if v in ("false", "0", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected true/false, got: {value!r}")
 
 
 if __name__ == "__main__":

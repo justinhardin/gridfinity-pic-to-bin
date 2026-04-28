@@ -115,6 +115,11 @@ examples:
         "--height-units", type=int, default=None,
         help="Force bin height in gridfinity units (default: auto)")
     parser.add_argument(
+        "--stacking", type=_parse_bool, default=True,
+        metavar="true|false",
+        help="Generate stacking lip (default: true). Set false to remove the "
+             "lip and reduce overall bin height for shallow drawers.")
+    parser.add_argument(
         "--output-dir", type=str, default="generated",
         help="Output directory (default: generated/)")
     parser.add_argument(
@@ -260,6 +265,7 @@ examples:
         dxf_path=combined_dxf,
         tool_heights=tool_heights,
         height_units=args.height_units,
+        stacking_lip=args.stacking,
         output_path=str(output_dir / "bin_config.json"),
     )
 
@@ -273,6 +279,17 @@ examples:
     print(f"  Config:  {config_path}")
     print(f"  Preview: {layout_result['preview_path']}")
     print(f"\nNext: Open Fusion 360 -> Scripts -> Run fusion_bin_script")
+
+
+def _parse_bool(value: str) -> bool:
+    """Parse a true/false string for argparse."""
+    v = value.strip().lower()
+    if v in ("true", "1", "yes", "y"):
+        return True
+    if v in ("false", "0", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected true/false, got: {value!r}")
 
 
 def _parse_tool_height_args(height_strs: list[str]) -> dict | float:
