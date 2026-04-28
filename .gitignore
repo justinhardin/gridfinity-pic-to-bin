@@ -16,6 +16,10 @@ generated/
 *.heif
 IMG_*.png
 
+# Screenshots (Windows / macOS default filenames)
+Screenshot*.png
+Screen Shot*.png
+
 # Python
 __pycache__/
 *.py[cod]

@@ -2,7 +2,7 @@
 
 Generate 3D-printable gridfinity bins with custom tool cutouts from phone camera photos.
 
-A printed ArUco marker template handles perspective correction and automatic scale calibration. The rest of the pipeline — SAM2 segmentation, vectorization, layout packing, and Fusion 360 config generation — runs automatically.
+A printed ArUco marker template handles perspective correction and automatic scale calibration. The rest of the pipeline — SAM2 segmentation, vectorization, layout packing, and Fusion 360 bin generation — runs automatically.
 
 ## Workflow overview
 
@@ -10,7 +10,7 @@ A printed ArUco marker template handles perspective correction and automatic sca
 1. Print the ArUco template (one-time setup)
 2. Place tool on template, photograph from above
 3. Run pic-to-bin → get a Fusion 360 config JSON
-4. Run the Fusion 360 script → get a parametric STL/STEP
+4. Click the "Gridfinity Pic-to-Bin" button in Fusion → get a parametric STL/STEP
 ```
 
 ---
@@ -21,7 +21,7 @@ A printed ArUco marker template handles perspective correction and automatic sca
 pip install gridfinity-pic-to-bin
 ```
 
-Dependencies (installed automatically): `ultralytics` (SAM2), `opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`, `pillow-heif`.
+Dependencies (installed automatically): `ultralytics` (SAM2), `opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`, `Pillow`, `pillow-heif`.
 
 ---
 
@@ -89,6 +89,14 @@ pic-to-bin photo.jpg --tool-height 17 --paper-size a4
 
 The paper size must match what you printed. Default is `letter`.
 
+### Shallow drawer (no stacking lip)
+
+```bash
+pic-to-bin photo.jpg --tool-height 17 --stacking false
+```
+
+Drops the 4.4 mm stacking lip for shorter bins in shallow drawers. Pocket depth is unchanged.
+
 ### All `pic-to-bin` options
 
 ```
@@ -101,10 +109,14 @@ required:
 
 optional:
   --paper-size {a4,letter,legal}  Template paper size (default: letter)
-  --tolerance MM                  Tolerance offset added around trace, mm (default: 0.8)
+  --tolerance MM                  Tolerance offset in mm (default: 0). Positive
+                                  expands the pocket past the trace (clearance
+                                  fit); negative shrinks it (interference fit).
   --gap MM                        Minimum gap between tools in layout, mm (default: 3.0)
   --max-units N                   Max gridfinity grid size per axis (default: 7)
   --height-units N                Force bin height in gridfinity units (default: auto)
+  --stacking BOOL                 Generate stacking lip (default: true). Set
+                                  false for a shorter bin without the lip.
   --output-dir DIR                Output directory (default: generated/)
   --straighten-threshold DEG      Max degrees to auto-straighten trace (default: 45, 0=off)
   --max-refine-iterations N       SAM2 cleanup iterations (default: 5)
@@ -112,6 +124,13 @@ optional:
   --sam-model WEIGHTS             SAM2 model file (default: sam2.1_l.pt)
   --skip-trace                    Skip tracing, reuse existing DXFs in generated/
 ```
+
+### Bin sizing logic
+
+- The bin auto-sizes to the smallest gridfinity unit count that fits the tool: `ceil((tool_height + 1mm) / 7mm)` height units.
+- The pocket floor sits 1 mm above the bin floor.
+- The deck rises to half the tool's height — the upper half of the tool stands proud for finger access; the lower half is buried in the pocket.
+- The combined cutout (pocket + finger slot) is centered in the bin floor; slack from rounding up to whole gridfinity units is distributed evenly on all four sides.
 
 ### Output files
 
@@ -124,6 +143,15 @@ generated/
   combined_layout.dxf         All tools packed into a bin footprint
   combined_layout_preview.png Layout preview image
   bin_config.json             Fusion 360 input config
+```
+
+After Fusion runs:
+
+```
+generated/
+  gridfinity_bin.stl
+  gridfinity_bin.step
+  gridfinity_bin_preview.png  Viewport screenshot of the finished bin
 ```
 
 ---
@@ -175,21 +203,54 @@ prepare-bin generated/combined_layout.dxf --tool-height 17
 
 ## Fusion 360 integration
 
-Install the bundled script into Fusion 360's Scripts directory:
+`pic-to-bin` ships in two flavors for Fusion 360 — a **toolbar add-in** (recommended) and a classic **script**. One install command sets up both:
 
 ```bash
 pic-to-bin-fusion install
 ```
 
-Then in Fusion 360: **Utilities → Scripts and Add-Ins → Scripts → pic_to_bin → Run**.
+This copies the add-in to `…/API/AddIns/pic_to_bin/` and the script to `…/API/Scripts/pic_to_bin/`, sharing the build code (`_bin_builder.py`) between them.
 
-Point it at `generated/bin_config.json`. The script generates the parametric bin body with pockets, tolerance offsets, and finger slots.
+### Add-in (recommended) — toolbar button
 
-To uninstall:
+1. Open Fusion 360.
+2. Press **Shift+S → Add-Ins tab**.
+3. Select **pic_to_bin → Run** (toggle **Run on Startup** to keep the button available every session).
+4. In a Design workspace, the **Solid > Create** panel now contains a **Gridfinity Pic-to-Bin** button.
+5. Click the button. The script auto-loads `<project>/generated/bin_config.json` if it exists; otherwise a file dialog opens defaulting to your Desktop.
+6. Bin gets built, exported as STL + STEP, and a viewport screenshot is saved alongside `bin_config.json`.
+
+### Script form (alternate)
+
+If you prefer the classic Scripts dialog:
+
+1. Press **Shift+S → Scripts tab**.
+2. Select **pic_to_bin → Run**.
+
+The behavior is identical to the add-in button.
+
+### What gets built
+
+The bin is generated in a fresh document with these timeline groups for easy navigation:
+
+- **Bin Body** — outer rectangular block. Appearance: ABS (White).
+- **Stacking Lip** (if enabled) — solid block + corner fillets + base-profile mating cutout + 0.6 mm top recess.
+- **Deck** — recessed surface around the pocket.
+- **Tool Pockets** — one cut per tool.
+- **Finger Slots** — one cut per tool, same floor as the pocket.
+- **Base Pads** — gridfinity baseplate-mating geometry, one Join extrude for all wide pads, one for the narrow posts, plus the two chamfers.
+
+### Reinstalling and reload
+
+Re-running `pic-to-bin-fusion install` overwrites both folders. The script and add-in entry points reload `_bin_builder.py` from disk on every invocation, so most code changes land on the next button click without restarting Fusion. Only changes to the entry-point files themselves (`pic_to_bin_script/pic_to_bin.py` or `pic_to_bin_addin/pic_to_bin.py`) require a Stop/Run on the add-in or a Fusion restart.
+
+### Uninstall
 
 ```bash
 pic-to-bin-fusion uninstall
 ```
+
+Removes both the script and the add-in.
 
 ---
 
@@ -201,7 +262,9 @@ pic-to-bin-fusion uninstall
 | `MarkerDetectionError: Only N markers (need ≥3)` | Markers obscured or overexposed | Improve lighting; don't cover markers with tool |
 | `ScaleInconsistencyError: H/V scales differ >5%` | Template not printed at 100% | Reprint with fit-to-page disabled |
 | `WARNING: Low effective DPI (<100)` | Camera too far away | Hold phone closer; use higher resolution mode |
-| Tools don't fit in grid | Tools too large for `--max-units` | Increase `--max-units` or use a smaller tolerance |
+| Tools don't fit in grid | Tools too large for `--max-units` | Increase `--max-units` |
+| Fusion freezes building pockets | Stale cached `_bin_builder` after editing | The reload is already wired in — just click the button again. If still stuck, restart Fusion. |
+| Pocket fits too loose / too tight | Tolerance default is now 0 (matches trace) | Adjust `--tolerance` (positive expands the pocket; negative shrinks it) |
 
 ### Common photo issues
 
