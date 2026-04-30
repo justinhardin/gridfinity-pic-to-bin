@@ -157,7 +157,7 @@ def _marker_corner_mm(cx_mm: float, cy_mm: float, marker_size_mm: float,
 def compute_homography(
     ids: np.ndarray,
     corners: list[np.ndarray],
-    paper_size: str = "a4",
+    paper_size: str = "legal",
 ) -> tuple[np.ndarray, float, dict]:
     """Compute perspective transform and effective DPI from detected markers.
 
@@ -336,7 +336,7 @@ def warp_image(image: np.ndarray, H: np.ndarray,
 
 def preprocess_phone_image(
     image_path: str,
-    paper_size: str = "a4",
+    paper_size: str = "legal",
     output_dir: str | None = None,
 ) -> dict:
     """Full phone-photo preprocessing: detect markers, correct perspective,
@@ -455,8 +455,8 @@ def main():
     parser.add_argument(
         "image", help="Phone photo with ArUco template visible")
     parser.add_argument(
-        "--paper-size", choices=["a4", "letter", "legal"], default="a4",
-        help="Template paper size (default: a4)")
+        "--paper-size", choices=["a4", "letter", "legal"], default="legal",
+        help="Template paper size (default: legal)")
     parser.add_argument(
         "--output-dir", type=str, default=None,
         help="Output directory (default: generated/<stem>)")

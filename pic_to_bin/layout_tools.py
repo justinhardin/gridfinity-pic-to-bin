@@ -505,7 +505,10 @@ def _polygon_pack(tools, gap_mm, max_width_mm, max_height_mm,
 
 def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
                       gridfinity_unit: float = 42.0,
-                      max_units: int = 7) -> tuple[list[PlacedTool], int, int]:
+                      max_units: int = 7,
+                      bin_margin_mm: float = 12.0,
+                      min_units: int = 1,
+                      ) -> tuple[list[PlacedTool], int, int]:
     """Pack tools into the smallest gridfinity bin.
 
     Two-phase approach:
@@ -513,6 +516,19 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
     2. Re-pack top candidates with polygon collision detection (actual shapes)
 
     Tools are centered horizontally within the final bin.
+
+    bin_margin_mm enforces a minimum clearance between the tool extent and
+    the bin's outer edge. snap-to-grid only rounds *up*, so a tool that
+    barely fits a given unit count (e.g. 104mm in a 3×42=126mm bin → 11mm
+    of slack on each side) would otherwise sit very close to the wall after
+    accounting for the wall thickness and stacking lip. Padding the total
+    extent by 2*bin_margin_mm before snap-to-grid pushes the bin one unit
+    bigger when a tool is within bin_margin_mm of the boundary.
+
+    min_units sets a floor on each axis. The packer still picks the
+    smallest fit, but the final grid is clamped up to min_units × min_units
+    so the bin never comes out smaller than requested. Tool centering runs
+    after clamping, so the extra slack distributes evenly.
 
     Returns:
         (placed_tools, grid_units_x, grid_units_y)
@@ -524,6 +540,7 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
     n = len(tools)
     max_w = max_units * gridfinity_unit
     max_h = max_units * gridfinity_unit
+    margin_pad = 2.0 * max(0.0, bin_margin_mm)
 
     # Pre-compute all transforms: 2 rotations × 2 mirror states = 4 per tool
     transforms = {}
@@ -577,8 +594,8 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
                       for j in range(n))
         total_h = max(positions[j][1] + padded[j]["height_mm"]
                       for j in range(n))
-        ux = snap_to_grid(total_w, gridfinity_unit)
-        uy = snap_to_grid(total_h, gridfinity_unit)
+        ux = snap_to_grid(total_w + margin_pad, gridfinity_unit)
+        uy = snap_to_grid(total_h + margin_pad, gridfinity_unit)
 
         if ux <= max_units and uy <= max_units:
             candidates.append({
@@ -618,8 +635,8 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
                       for j in range(n))
         total_h = max(positions[j][1] + ordered_tools[j].bbox["height_mm"]
                       for j in range(n))
-        ux = snap_to_grid(total_w, gridfinity_unit)
-        uy = snap_to_grid(total_h, gridfinity_unit)
+        ux = snap_to_grid(total_w + margin_pad, gridfinity_unit)
+        uy = snap_to_grid(total_h + margin_pad, gridfinity_unit)
 
         if ux > max_units or uy > max_units:
             continue
@@ -648,6 +665,12 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
 
     combo, positions, units_x, units_y = best_result
 
+    # Apply minimum bin size before centering so the slack from any clamped
+    # axis distributes evenly around the tools.
+    min_units = max(1, int(min_units))
+    units_x = max(units_x, min_units)
+    units_y = max(units_y, min_units)
+
     # Center tools within the bin (both axes)
     bin_w = units_x * gridfinity_unit
     bin_h = units_y * gridfinity_unit
@@ -665,6 +688,8 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
     y_shift = (bin_h - content_h) / 2 - min_y
 
     placed = []
+    placed_widths = []
+    placed_heights = []
     for j in range(n):
         idx = tool_order[j]
         angle, mirrored = combo[idx]
@@ -676,6 +701,37 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
             offset_x=px + x_shift,
             offset_y=py + y_shift,
         ))
+        placed_widths.append(tool_widths[j])
+        placed_heights.append(tool_heights[j])
+
+    # Per-tool re-centering: a tool whose y-range is shared with no other
+    # tool has its "row" to itself and can be horizontally centered in the
+    # bin independently. Same for x. The collective center pass above keeps
+    # the group balanced; this pass cleans up the case where individual
+    # tools get nudged off-axis by the polygon packer (e.g. when one has a
+    # slot that extends past its body in x while the other doesn't).
+    eps = 0.5  # mm, treat near-touching ranges as overlapping
+    for j in range(len(placed)):
+        jy0 = placed[j].offset_y
+        jy1 = jy0 + placed_heights[j]
+        jx0 = placed[j].offset_x
+        jx1 = jx0 + placed_widths[j]
+
+        y_alone = all(
+            placed[k].offset_y + placed_heights[k] <= jy0 + eps
+            or placed[k].offset_y >= jy1 - eps
+            for k in range(len(placed)) if k != j
+        )
+        if y_alone:
+            placed[j].offset_x = (bin_w - placed_widths[j]) / 2.0
+
+        x_alone = all(
+            placed[k].offset_x + placed_widths[k] <= jx0 + eps
+            or placed[k].offset_x >= jx1 - eps
+            for k in range(len(placed)) if k != j
+        )
+        if x_alone:
+            placed[j].offset_y = (bin_h - placed_heights[j]) / 2.0
 
     return placed, units_x, units_y
 
@@ -768,6 +824,8 @@ def generate_preview(placed_tools: list[PlacedTool],
 
 def layout_tools(dxf_paths: list[str], gap_mm: float = 3.0,
                  gridfinity_unit: float = 42.0, max_units: int = 7,
+                 bin_margin_mm: float = 12.0,
+                 min_units: int = 1,
                  output_dir: str = None) -> dict:
     """Main pipeline: load DXFs, pack, write combined DXF + preview."""
     if output_dir is None:
@@ -788,7 +846,8 @@ def layout_tools(dxf_paths: list[str], gap_mm: float = 3.0,
     print(f"Packing with {gap_mm}mm gap...")
     placed, units_x, units_y = pack_tools_greedy(
         tools, gap_mm=gap_mm, gridfinity_unit=gridfinity_unit,
-        max_units=max_units)
+        max_units=max_units, bin_margin_mm=bin_margin_mm,
+        min_units=min_units)
 
     bin_w = units_x * gridfinity_unit
     bin_h = units_y * gridfinity_unit
@@ -839,6 +898,10 @@ def main():
                         help="Gridfinity unit size in mm (default: 42.0)")
     parser.add_argument("--max-units", type=int, default=7,
                         help="Maximum grid size in units (default: 7)")
+    parser.add_argument("--min-units", type=int, default=1,
+                        help="Minimum grid size in units per axis (default: 1). "
+                             "Forces the bin to at least min_units x min_units, "
+                             "even if the tools fit in a smaller grid.")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: generated/)")
 
@@ -849,6 +912,7 @@ def main():
         gap_mm=args.gap,
         gridfinity_unit=args.grid_unit,
         max_units=args.max_units,
+        min_units=args.min_units,
         output_dir=args.output_dir,
     )
 

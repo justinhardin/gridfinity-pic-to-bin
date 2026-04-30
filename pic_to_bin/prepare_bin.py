@@ -126,44 +126,36 @@ def _group_polygons_into_tools(
     are assigned to it (pyclipper offset can produce multiple tolerance polygons
     for tools with narrow necks or concavities).
     """
-    tools = []
-
-    # Track which tolerance/slot polys have been assigned
-    tol_assigned = [False] * len(tolerance_polys)
-    slot_assigned = [False] * len(slot_polys)
-
-    for inner in inner_polys:
-        bbox = _compute_bbox([inner])
-        tool = {
+    # Each tolerance/slot poly goes to its CLOSEST tool body. Assigning by a
+    # fixed distance threshold means the first tool (in iteration order) grabs
+    # everything within range — and a slot is up to a full bin-diameter away
+    # from a body, so a single threshold can't both reach a tool's own slot
+    # and reject another tool's slot.
+    tools = [
+        {
             "inner_polys_mm": [[[x, y] for x, y in inner]],
             "tolerance_polys_mm": [],
             "slot_polys_mm": [],
-            "bbox_mm": bbox,
+            "bbox_mm": _compute_bbox([inner]),
         }
+        for inner in inner_polys
+    ]
 
-        # Assign ALL unassigned tolerance polygons within distance threshold
-        tool_tols = []
-        for i, tol in enumerate(tolerance_polys):
-            if tol_assigned[i]:
-                continue
-            d = _poly_distance(inner, tol)
-            if d < 50:
-                tol_assigned[i] = True
-                tool_tols.append([[x, y] for x, y in tol])
-        tool["tolerance_polys_mm"] = tool_tols
+    def _assign_to_closest(poly, target_key, max_distance):
+        best_idx = -1
+        best_d = float("inf")
+        for ti, inner in enumerate(inner_polys):
+            d = _poly_distance(inner, poly)
+            if d < best_d:
+                best_d = d
+                best_idx = ti
+        if best_idx >= 0 and best_d < max_distance:
+            tools[best_idx][target_key].append([[x, y] for x, y in poly])
 
-        # Assign ALL unassigned slot polygons within distance threshold
-        tool_slots = []
-        for i, sl in enumerate(slot_polys):
-            if slot_assigned[i]:
-                continue
-            d = _poly_distance(inner, sl)
-            if d < 200:
-                slot_assigned[i] = True
-                tool_slots.append([[x, y] for x, y in sl])
-        tool["slot_polys_mm"] = tool_slots
-
-        tools.append(tool)
+    for tol in tolerance_polys:
+        _assign_to_closest(tol, "tolerance_polys_mm", max_distance=50)
+    for sl in slot_polys:
+        _assign_to_closest(sl, "slot_polys_mm", max_distance=200)
 
     return tools
 
@@ -236,23 +228,25 @@ SLOT_INSET_MM = 4.0  # slot cutouts stop this far inside the bin edge
 
 def _center_tools_in_bin(tools: list, bin_width_mm: float,
                          bin_height_mm: float) -> None:
-    """Shift every tool's polys so the combined (inner + tolerance + slot)
+    """Shift every tool's polys so the combined tool-body (inner + tolerance)
     bbox sits in the middle of the bin.
 
     Layout packing places tools against the (0, 0) corner; rounding the bin
     up to whole gridfinity units leaves uneven slack on the high-x/high-y
-    sides. This redistributes the slack evenly so the cutout — including
-    the finger slot — is centered. Mutates `tools` in place.
+    sides. This redistributes the slack evenly so the tool body is centered.
+    Slot polys are translated by the same dx/dy so they keep their position
+    relative to the body, but they are *not* part of the bbox calculation —
+    a slot that extends past the body sideways would otherwise pull the body
+    off-center toward the opposite side. Mutates `tools` in place.
     """
-    all_polys = []
+    body_polys = []
     for tool in tools:
-        all_polys.extend(tool.get("inner_polys_mm", []))
-        all_polys.extend(tool.get("tolerance_polys_mm", []))
-        all_polys.extend(tool.get("slot_polys_mm", []))
-    if not all_polys:
+        body_polys.extend(tool.get("inner_polys_mm", []))
+        body_polys.extend(tool.get("tolerance_polys_mm", []))
+    if not body_polys:
         return
 
-    bbox = _compute_bbox(all_polys)
+    bbox = _compute_bbox(body_polys)
     dx = (bin_width_mm - bbox["width_mm"]) / 2.0 - bbox["min_x"]
     dy = (bin_height_mm - bbox["height_mm"]) / 2.0 - bbox["min_y"]
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:

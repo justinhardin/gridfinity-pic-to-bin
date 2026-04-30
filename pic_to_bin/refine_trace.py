@@ -279,6 +279,9 @@ def refine_trace(
     max_concavity_depth_mm: float = 3.0,
     sam_model: str = "sam2.1_l.pt",
     mask_erode_mm: float = 0.3,
+    tool_height_mm: float = 0.0,
+    phone_height_mm: float = 0.0,
+    finger_slots: bool = True,
 ) -> dict:
     """Run trace_tool iteratively, adjusting cleanup params to preserve concavities.
 
@@ -383,6 +386,9 @@ def refine_trace(
         alphamax=alphamax, turdsize=turdsize, opttolerance=opttolerance,
         straighten_threshold=straighten_threshold,
         output_dir=str(output_dir),
+        tool_height_mm=tool_height_mm,
+        phone_height_mm=phone_height_mm,
+        finger_slots=finger_slots,
         **params.to_dict(),
     )
 

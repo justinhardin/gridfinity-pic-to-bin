@@ -63,9 +63,12 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h, w = gray.shape
 
-    # --- Step 1: Find approximate tool location via Otsu threshold ---
+    # --- Step 1: Find approximate tool location ---
+    # Background detection from corners (gray is fine here — we only need to
+    # know if the surround is light or dark to pick the right "non-bg" score).
     margin = min(10, h // 20, w // 20)
     corners = np.concatenate([
         gray[:margin, :margin].ravel(),
@@ -75,12 +78,20 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     ])
     bg_median = float(np.median(corners))
 
+    # "Distance from background" score, then Otsu. On light backgrounds
+    # plain gray-Otsu can split multi-tone tools (e.g. yellow body + black
+    # grips) into many disconnected dark fragments because the bright body
+    # gets binned with the paper. Using max(saturation, 255 - value) instead
+    # treats both saturated *and* dark pixels as foreground, so the whole
+    # tool comes through as one contiguous component.
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
     if bg_median > 128:
-        _, rough_mask = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        score = np.maximum(sat, 255 - val)
     else:
-        _, rough_mask = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        score = np.maximum(sat, val)
+    _, rough_mask = cv2.threshold(
+        score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # Clean rough mask to get a stable bounding box
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
@@ -92,16 +103,26 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
 
     bbox = None
     if contours:
-        largest = max(contours, key=cv2.contourArea)
-        area_frac = cv2.contourArea(largest) / (h * w)
-        if area_frac > 0.01:  # at least 1% of image
-            bx, by, bw, bh = cv2.boundingRect(largest)
+        # Multi-tone tools (yellow body + black grips, etc.) on a light
+        # background can produce several disconnected Otsu components — one
+        # per dark feature. Union the bboxes of every tool-sized contour so
+        # SAM2's bbox prompt spans the whole tool, not just the largest
+        # fragment. Falls through to the single-contour case naturally.
+        img_area = h * w
+        tool_contours = [c for c in contours
+                         if cv2.contourArea(c) / img_area > 0.01]
+        if tool_contours:
+            rects = [cv2.boundingRect(c) for c in tool_contours]
+            bx = min(r[0] for r in rects)
+            by = min(r[1] for r in rects)
+            bx2 = max(r[0] + r[2] for r in rects)
+            by2 = max(r[1] + r[3] for r in rects)
             pad = max(30, int(0.02 * max(h, w)))
             bbox = [
                 max(0, bx - pad),
                 max(0, by - pad),
-                min(w, bx + bw + pad),
-                min(h, by + bh + pad),
+                min(w, bx2 + pad),
+                min(h, by2 + pad),
             ]
 
     # --- Step 2: SAM2 segmentation ---
@@ -732,6 +753,9 @@ def trace_from_mask(
     notch_fill_mm: float = 2.4,
     straighten_threshold: float = 45.0,
     output_dir: str = "generated",
+    tool_height_mm: float = 0.0,
+    phone_height_mm: float = 0.0,
+    finger_slots: bool = True,
 ) -> dict:
     """Run cleanup → straighten → vectorize → export on a pre-segmented mask.
 
@@ -763,6 +787,32 @@ def trace_from_mask(
     output_dir.mkdir(parents=True, exist_ok=True)
     scale = 25.4 / dpi
 
+    # Parallax compensation: a tool of thickness tool_height_mm photographed
+    # from height phone_height_mm appears larger than reality because its top
+    # surface sits closer to the camera than the marker plane. The homography
+    # corrects perspective on the marker plane only; objects above z=0 still
+    # get inflated by H/(H-z). For a flat-bottomed tool with vertical-ish
+    # sides (most hand tools — screwdrivers, pliers, hammers, wrenches), the
+    # silhouette as seen from overhead is bounded by the top face: the bottom
+    # edge is hidden behind it, so the visible outline tracks z=tool_height,
+    # not the mid-height. Using half-height under-compensates by ~2-3% per
+    # axis, which is invisible on short dimensions but several mm on long
+    # ones. Shrink mm-per-pixel by the inverse so every downstream polygon
+    # (inner, tolerance, slot) lands at true mm.
+    if phone_height_mm > 0 and tool_height_mm > 0:
+        z = tool_height_mm
+        if z < phone_height_mm:
+            parallax_factor = (phone_height_mm - z) / phone_height_mm
+            scale *= parallax_factor
+            print(f"  Parallax compensation: phone={phone_height_mm:.0f}mm, "
+                  f"tool={tool_height_mm:.1f}mm, factor={parallax_factor:.4f} "
+                  f"({(1 - parallax_factor) * 100:.1f}% shrink)")
+
+    if abs(tolerance_mm) > 0.001:
+        sign = "expand" if tolerance_mm > 0 else "shrink"
+        print(f"  Tolerance: {sign} pocket by {abs(tolerance_mm):.2f}mm "
+              f"(written to TOLERANCE layer)")
+
     # Cleanup
     print("  Mask cleanup...")
     mask = cleanup_mask(raw_mask.copy(), dpi=dpi,
@@ -788,9 +838,13 @@ def trace_from_mask(
                           opttolerance=opttolerance)
 
     # Finger slot
-    print("  Finger slot placement...")
-    slot_polygon = compute_finger_slot(path, scale, clearance_mm=clearance_mm,
-                                       img_shape=mask.shape)
+    if finger_slots:
+        print("  Finger slot placement...")
+        slot_polygon = compute_finger_slot(path, scale, clearance_mm=clearance_mm,
+                                           img_shape=mask.shape)
+    else:
+        print("  Finger slot disabled (--slots false)")
+        slot_polygon = None
 
     # Export SVG
     print("  Export SVG...")

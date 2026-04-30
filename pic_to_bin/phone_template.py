@@ -83,7 +83,7 @@ def _compute_marker_positions(paper_w: float, paper_h: float,
     ]
 
 
-def get_marker_positions(paper_size: str = "a4",
+def get_marker_positions(paper_size: str = "legal",
                          ) -> list[tuple[int, float, float]]:
     """Return marker (id, x_mm, y_mm) positions for the given paper size.
 
@@ -105,7 +105,7 @@ def get_marker_positions(paper_size: str = "a4",
     return _compute_marker_positions(pw, ph)
 
 
-def get_placement_zone(paper_size: str = "a4",
+def get_placement_zone(paper_size: str = "legal",
                        ) -> tuple[float, float, float, float]:
     """Return the tool placement zone (x0, y0, x1, y1) in mm.
 
@@ -146,7 +146,7 @@ def _generate_marker_image(marker_id: int, size_px: int = 200) -> np.ndarray:
 # Template PDF generation
 # ---------------------------------------------------------------------------
 
-def generate_template(output_path: str, paper_size: str = "a4") -> str:
+def generate_template(output_path: str, paper_size: str = "legal") -> str:
     """Generate a printable PDF template with ArUco markers.
 
     Args:
@@ -230,8 +230,8 @@ def main():
         description="Generate a printable ArUco marker template for "
                     "phone-camera scanning")
     parser.add_argument(
-        "--paper-size", choices=["a4", "letter", "legal"], default="a4",
-        help="Paper size (default: a4)")
+        "--paper-size", choices=["a4", "letter", "legal"], default="legal",
+        help="Paper size (default: legal)")
     parser.add_argument(
         "--output", type=str, default=None,
         help="Output PDF path (default: phone_template_<size>.pdf)")

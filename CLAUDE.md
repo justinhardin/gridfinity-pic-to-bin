@@ -190,7 +190,7 @@ Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `
 - **Homography safety**: RANSAC rejects outlier corners from wrinkled paper or partially occluded markers. 8 markers give up to 32 point pairs for a 4-DOF homography.
 - **White border fill**: Warped image uses white border (`borderValue=255,255,255`) so areas outside the template appear as white background, which SAM2 handles correctly.
 - **Effective DPI**: Computed from the homography inverse — how many pixels per mm at the template center. Typically 100-250 for phone photos.
-- **Tolerance default = 0**: The pocket matches the trace exactly. Positive `--tolerance` expands the pocket past the trace (clearance fit); negative shrinks it (interference fit). The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm, so the cut stays light on points regardless of offset value.
+- **Tolerance default = 1 mm**: The pocket is offset 1 mm outward from the trace by default for an easy clearance fit. `--tolerance 0` matches the trace exactly; positive values widen the clearance further; negative shrinks it for an interference fit. The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm, so the cut stays light on points regardless of offset value.
 
 ## Relationship to gridfinity-scan-to-bin
 

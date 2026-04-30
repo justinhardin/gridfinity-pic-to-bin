@@ -13,6 +13,7 @@ Minimal usage:
 
 Full usage:
     pic-to-bin photo1.jpg photo2.jpg --tool-height 0=17 --tool-height 1=14 --paper-size letter
+    (default paper size is legal)
 """
 
 import argparse
@@ -88,7 +89,7 @@ def main():
 examples:
   pic-to-bin photo.jpg --tool-height 17
   pic-to-bin a.jpg b.jpg --tool-height 0=17 --tool-height 1=14
-  pic-to-bin photo.jpg --tool-height 17 --paper-size legal
+  pic-to-bin photo.jpg --tool-height 17 --paper-size letter
 """,
     )
 
@@ -100,18 +101,40 @@ examples:
         help="Tool height in mm (required). Use INDEX=VALUE for per-tool "
              "(e.g. --tool-height 0=17 --tool-height 1=14)")
     parser.add_argument(
-        "--paper-size", choices=["a4", "letter", "legal"], default="letter",
-        help="Template paper size used for photos (default: letter)")
+        "--paper-size", choices=["a4", "letter", "legal"], default="legal",
+        help="Template paper size used for photos (default: legal)")
     parser.add_argument(
-        "--tolerance", type=float, default=0.0,
-        help="Tolerance outline offset in mm (default: 0). Positive "
-             "expands the pocket past the trace; negative shrinks it.")
+        "--tolerance", type=float, default=1.0,
+        help="Tolerance outline offset in mm (default: 1). Positive "
+             "expands the pocket past the trace (clearance fit); negative "
+             "shrinks it (interference fit); 0 matches the trace exactly.")
+    parser.add_argument(
+        "--phone-height", type=float, default=300.0,
+        help="Phone camera height above the template in mm (default: 300). "
+             "Used to compensate parallax: a tool sitting above the paper "
+             "appears larger in the photo than it really is, by a factor of "
+             "phone_height / (phone_height - tool_height/2). Lower values "
+             "apply more compensation; 0 disables compensation.")
     parser.add_argument(
         "--gap", type=float, default=3.0,
         help="Minimum gap between tools in mm (default: 3.0)")
     parser.add_argument(
+        "--bin-margin", type=float, default=0.0,
+        help="Extra clearance in mm between the tool extent and the bin "
+             "boundary, applied before snap-to-grid (default: 0). With a "
+             "non-zero --tolerance plus the natural slack from rounding the "
+             "bin size up to a whole gridfinity unit, no extra padding is "
+             "usually needed. Set this >0 to force the bin one unit larger "
+             "when the tool gets within bin_margin_mm of the wall.")
+    parser.add_argument(
         "--max-units", type=int, default=7,
         help="Maximum grid size in gridfinity units per axis (default: 7)")
+    parser.add_argument(
+        "--min-units", type=int, default=1,
+        help="Minimum grid size in gridfinity units per axis (default: 1). "
+             "Forces the bin to at least min_units x min_units even if the "
+             "tools would fit in a smaller grid. Useful to match an existing "
+             "drawer slot or other bins in the same set.")
     parser.add_argument(
         "--height-units", type=int, default=None,
         help="Force bin height in gridfinity units (default: auto)")
@@ -120,6 +143,12 @@ examples:
         metavar="true|false",
         help="Generate stacking lip (default: true). Set false to remove the "
              "lip and reduce overall bin height for shallow drawers.")
+    parser.add_argument(
+        "--slots", type=_parse_bool, default=True,
+        metavar="true|false",
+        help="Generate finger-access slots in the pocket (default: true). "
+             "Set false to omit slots entirely — useful for tools that don't "
+             "need a finger pull or where the slot intrudes awkwardly.")
     parser.add_argument(
         "--output-dir", type=str, default="generated",
         help="Output directory (default: generated/)")
@@ -157,6 +186,9 @@ examples:
     print(f"Found {len(image_paths)} image(s): "
           + ", ".join(p.name for p in image_paths))
 
+    # Parse tool heights early so the trace step can apply parallax compensation.
+    tool_heights = _parse_tool_height_args(args.tool_heights)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Steps 1-2: Preprocess + Trace each image ──────────────────────
@@ -174,7 +206,7 @@ examples:
         print("\n" + "=" * 60)
         print("STEP 1/3: Phone preprocessing + Tracing tool outlines")
         print("=" * 60)
-        for img in image_paths:
+        for idx, img in enumerate(image_paths):
             tool_output_dir = output_dir / img.stem
             try:
                 # Step 1: Phone preprocessing
@@ -191,6 +223,7 @@ examples:
 
                 # Step 2: Trace (SAM2 segmentation on rectified image)
                 print(f"\n--- Tracing {img.name} ---")
+                tool_height_mm = _resolve_tool_height(tool_heights, idx)
                 result = refine_trace(
                     image_path=str(rectified_img),
                     dpi=dpi,
@@ -201,6 +234,9 @@ examples:
                     max_concavity_depth_mm=args.max_concavity_depth,
                     sam_model=args.sam_model,
                     mask_erode_mm=args.mask_erode,
+                    tool_height_mm=tool_height_mm,
+                    phone_height_mm=args.phone_height,
+                    finger_slots=args.slots,
                 )
                 dxf_paths.append(result["dxf_path"])
                 iters = result.get("refinement_iterations", 1)
@@ -226,11 +262,14 @@ examples:
     print("=" * 60)
 
     max_units = args.max_units
+    min_units = args.min_units
     try:
         layout_result = layout_tools(
             dxf_paths=dxf_paths,
             gap_mm=args.gap,
             max_units=max_units,
+            min_units=min_units,
+            bin_margin_mm=args.bin_margin,
             output_dir=str(output_dir),
         )
     except GridSizeError as e:
@@ -250,6 +289,8 @@ examples:
             dxf_paths=dxf_paths,
             gap_mm=args.gap,
             max_units=required,
+            min_units=min_units,
+            bin_margin_mm=args.bin_margin,
             output_dir=str(output_dir),
         )
 
@@ -259,8 +300,6 @@ examples:
     print("\n" + "=" * 60)
     print("STEP 3/3: Generating bin config")
     print("=" * 60)
-
-    tool_heights = _parse_tool_height_args(args.tool_heights)
 
     config_path = prepare_bin(
         dxf_path=combined_dxf,
@@ -291,6 +330,17 @@ def _parse_bool(value: str) -> bool:
         return False
     raise argparse.ArgumentTypeError(
         f"Expected true/false, got: {value!r}")
+
+
+def _resolve_tool_height(tool_heights, idx: int, default: float = 0.0) -> float:
+    """Look up the tool height for image index *idx* from the parsed args."""
+    if isinstance(tool_heights, (int, float)):
+        return float(tool_heights)
+    if idx in tool_heights:
+        return float(tool_heights[idx])
+    if "default" in tool_heights:
+        return float(tool_heights["default"])
+    return float(default)
 
 
 def _parse_tool_height_args(height_strs: list[str]) -> dict | float:
