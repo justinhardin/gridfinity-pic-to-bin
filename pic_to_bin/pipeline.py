@@ -109,8 +109,8 @@ examples:
              "expands the pocket past the trace (clearance fit); negative "
              "shrinks it (interference fit); 0 matches the trace exactly.")
     parser.add_argument(
-        "--phone-height", type=float, default=300.0,
-        help="Phone camera height above the template in mm (default: 300). "
+        "--phone-height", type=float, default=None,
+        help="Phone camera height above the template in mm (default: 482). "
              "Used to compensate parallax: a tool sitting above the paper "
              "appears larger in the photo than it really is, by a factor of "
              "phone_height / (phone_height - tool_height/2). Lower values "
@@ -173,6 +173,18 @@ examples:
         help="Skip tracing, reuse existing DXFs in generated/")
 
     args = parser.parse_args()
+
+    # Confirm parallax-compensation default if --phone-height was omitted.
+    DEFAULT_PHONE_HEIGHT_MM = 482.0
+    if args.phone_height is None:
+        response = input(
+            f"You haven't specified --phone-height. "
+            f"Is the default of {DEFAULT_PHONE_HEIGHT_MM:.0f} mm ok? [y/N] "
+        )
+        if response.strip().lower() != "y":
+            print("Aborted. Re-run with --phone-height <mm> to specify.")
+            sys.exit(1)
+        args.phone_height = DEFAULT_PHONE_HEIGHT_MM
 
     output_dir = Path(args.output_dir)
 

@@ -370,9 +370,17 @@ def preprocess_phone_image(
     print(f"Phone preprocessing: {image_path.name}")
 
     # Load image
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    if image_path.stat().st_size == 0:
+        raise ValueError(
+            f"Image file is empty (0 bytes): {image_path}. "
+            f"Re-transfer the photo from your phone.")
     img = cv2.imread(str(image_path))
     if img is None:
-        raise FileNotFoundError(f"Could not read image: {image_path}")
+        raise ValueError(
+            f"Could not decode image: {image_path}. "
+            f"The file may be corrupt or in an unsupported format.")
     print(f"  Image: {img.shape[1]}x{img.shape[0]} px")
 
     # Detect markers
