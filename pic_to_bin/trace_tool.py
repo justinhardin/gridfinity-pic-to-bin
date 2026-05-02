@@ -154,10 +154,11 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     print(f"  Segmentation: SAM2 ({sam_model})")
     print(f"  Mask shape: {mask.shape}, tool pixels: {np.count_nonzero(mask)}")
 
-    # On bright backgrounds, recover dark tool regions (e.g. black metal
-    # handles) that SAM2 may exclude.  Uses Otsu thresholding to find all
-    # non-background pixels and adds threshold-connected regions back.
-    mask = _recover_bright_bg_missed(mask, gray)
+    # On bright backgrounds, recover tool regions (dark handles AND saturated
+    # colored regions like yellow labels) that SAM2 may exclude. Uses an
+    # HSV-based score to find non-background pixels and adds threshold-
+    # connected regions back.
+    mask = _recover_bright_bg_missed(mask, gray, hsv)
 
     # Refine mask using original image brightness to carve out interior
     # gaps (e.g. handle gaps on pliers) that SAM may fill.
@@ -214,24 +215,34 @@ def _extract_best_mask(results, img_h: int, img_w: int) -> np.ndarray:
     return mask
 
 
-def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
-    """Recover dark tool regions that SAM2 missed on bright backgrounds.
+def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray,
+                              hsv: np.ndarray) -> np.ndarray:
+    """Recover tool regions that SAM2 missed on bright backgrounds.
 
     On white/bright backgrounds (e.g. white paper under the scanner lid),
-    SAM2 may exclude dark surfaces (black metal handles, pivot mechanisms)
-    that contrast differently from the main tool body (orange/colored grips).
-    These dark surfaces are clearly non-background in a simple threshold,
-    but SAM2's neural segmentation doesn't associate them with the object.
+    SAM2 may exclude parts of a multi-tone tool — black metal handles next
+    to colored grips, OR a black case wrapping a saturated label (e.g. the
+    yellow ZIRCON insert in a black stud-finder body). These regions are
+    clearly non-background, but SAM2's neural segmentation segments only one
+    sub-region as the "object".
 
     Strategy:
     1. Detect bright background (median > 128).
-    2. Otsu threshold finds all non-background pixels (both coloured and dark).
+    2. Threshold a "distance from background" score — max(saturation, 255-value)
+       — so both saturated colors AND dark pixels count as foreground. Plain
+       grayscale Otsu fails here: bright yellow (gray ~225) is too close to
+       white paper (~250), so a yellow region adjacent to a black region gets
+       split off into the background class.
     3. Connected components of the threshold mask identify contiguous
        foreground blobs.
     4. Any threshold component that overlaps the SAM2 mask is part of the
-       tool — its full extent (including dark areas SAM2 missed) is added.
-    5. Safety: if recovery would grow the mask by more than 50%, skip
-       (suggests threshold noise connecting to scanner-edge artifacts).
+       tool — its full extent (including regions SAM2 missed) is added.
+    5. Safety: if the recovered mask would cover more than 50% of the image
+       area, skip (suggests threshold noise connecting through the SAM mask
+       to scanner-edge artifacts). The earlier "more than 50% of the SAM
+       mask" rule failed when SAM segmented one half of a multi-tone tool
+       (e.g. yellow label inside a black case) — the missed half can be
+       legitimately larger than the segmented half.
 
     Only runs on bright backgrounds.  Dark-background scans use
     ``_refine_mask_with_image`` instead (which carves interior gaps).
@@ -239,9 +250,10 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
     Args:
         mask: Binary mask (uint8, 0/255) from SAM2
         gray: Grayscale original image (same dimensions as mask)
+        hsv: HSV original image (same dimensions as mask)
 
     Returns:
-        Mask with recovered dark regions (or original mask if not applicable)
+        Mask with recovered regions (or original mask if not applicable)
     """
     tool_region = mask > 128
     bg_region = ~tool_region
@@ -253,9 +265,13 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
     if bg_median <= 60:
         return mask  # dark background — handled by _refine_mask_with_image
 
-    # Otsu threshold: all non-background pixels
+    # Otsu threshold on a colorimetric "distance from white" score so both
+    # saturated colors and dark pixels are treated as foreground.
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    score = np.maximum(sat, 255 - val)
     _, thresh = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # Light cleanup — close small gaps, remove noise specks
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -280,17 +296,21 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
         return mask
 
     original_size = int(np.count_nonzero(tool_region))
-    ratio = added / original_size if original_size > 0 else 0
+    final_size = original_size + added
+    image_area = mask.shape[0] * mask.shape[1]
+    image_fraction = final_size / image_area
 
-    if ratio > 0.5:
-        print(f"  Bright-bg recovery: SKIPPED — would add {added} px "
-              f"({100 * ratio:.0f}% of mask, exceeds 50% limit)")
+    if image_fraction > 0.5:
+        print(f"  Bright-bg recovery: SKIPPED — would cover {100 * image_fraction:.0f}% "
+              f"of image (exceeds 50% limit; suggests threshold noise)")
         return mask
 
     recovered = mask.copy()
     recovered[recovery] = 255
+    ratio = added / original_size if original_size > 0 else 0
     print(f"  Bright-bg recovery: added {added} px "
-          f"({100 * ratio:.1f}% of mask)")
+          f"({100 * ratio:.0f}% of original mask, "
+          f"final mask is {100 * image_fraction:.0f}% of image)")
     return recovered
 
 
