@@ -47,6 +47,14 @@ from pic_to_bin.prepare_bin import prepare_bin
 
 DEFAULT_PHONE_HEIGHT_MM = 482.0
 
+# Baseline tolerance offset (mm) added to whatever the user requests before
+# the trace is offset. Empirically, prints came out too tight at the old
+# "tolerance=1mm" default; the baseline shifts the user's "0" input to a
+# physical 1.5mm clearance, which matches a comfortable clearance fit on
+# typical FDM prints. Setting `--tolerance -1.5` recovers an exact-trace
+# match; more negative values produce an interference fit.
+TOLERANCE_BASELINE_MM = 1.5
+
 
 # ---------------------------------------------------------------------------
 # Progress events (for web UI / programmatic callers)
@@ -84,7 +92,7 @@ def run_pipeline(
     *,
     output_dir,
     paper_size: str = "legal",
-    tolerance: float = 1.0,
+    tolerance: float = 0.0,
     phone_height: float = DEFAULT_PHONE_HEIGHT_MM,
     gap: float = 3.0,
     bin_margin: float = 0.0,
@@ -188,7 +196,7 @@ def run_pipeline(
                 result = refine_trace(
                     image_path=str(rectified_img),
                     dpi=dpi,
-                    tolerance_mm=tolerance,
+                    tolerance_mm=tolerance + TOLERANCE_BASELINE_MM,
                     straighten_threshold=straighten_threshold,
                     output_dir=str(tool_output_dir),
                     max_iterations=max_refine_iterations,
@@ -369,10 +377,13 @@ examples:
         "--paper-size", choices=["a4", "letter", "legal"], default="legal",
         help="Template paper size used for photos (default: legal)")
     parser.add_argument(
-        "--tolerance", type=float, default=1.0,
-        help="Tolerance outline offset in mm (default: 1). Positive "
-             "expands the pocket past the trace (clearance fit); negative "
-             "shrinks it (interference fit); 0 matches the trace exactly.")
+        "--tolerance", type=float, default=0.0,
+        help=f"Extra tolerance in mm relative to the standard fit "
+             f"(default: 0). The pipeline always adds {TOLERANCE_BASELINE_MM} "
+             f"mm of baseline clearance so the printed pocket fits typical "
+             f"FDM tolerances; --tolerance is added on top of that. Positive "
+             f"= looser fit, negative = tighter, "
+             f"--tolerance -{TOLERANCE_BASELINE_MM} = exact trace match.")
     parser.add_argument(
         "--phone-height", type=float, default=None,
         help="Phone camera height above the template in mm (default: 482). "

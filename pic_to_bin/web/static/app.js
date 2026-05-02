@@ -6,9 +6,12 @@ import { LitElement, html, css, nothing } from "lit";
 // touches them, so they consciously confirm or change the value.
 const SOFT_DEFAULT_FIELDS = new Set(["phone_height"]);
 
+// Must match TOLERANCE_BASELINE_MM in pipeline.py — used in modal copy only.
+const TOLERANCE_BASELINE_MM = 1.5;
+
 const FORM_DEFAULTS = {
   paper_size: "legal",
-  tolerance: 1.0,
+  tolerance: 0.0,
   phone_height: 482.0,
   gap: 3.0,
   bin_margin: 0.0,
@@ -67,12 +70,12 @@ const FIELD_INFO = {
   },
   tolerance: {
     title: "Tolerance (mm)",
-    hint: "+ for clearance fit, − for interference fit, 0 = exact trace.",
+    hint: "Extra clearance on top of the standard fit. Default 0 is recommended.",
     body: [
-      "How far the pocket outline is offset from the actual tool trace.",
-      "Positive (default 1 mm) — clearance fit. Easy to drop the tool in and pluck it out. Use larger values for soft tools or sloppy traces.",
-      "Zero — pocket matches the trace exactly. Tight fit; may require a little sanding.",
-      "Negative — interference fit. The tool wedges in. Useful for things you don't want rattling out (e.g. drill bits).",
+      `Extra clearance applied to the pocket on top of a built-in ${TOLERANCE_BASELINE_MM} mm baseline. The baseline is calibrated for typical FDM 3D printer tolerances — at the default 0, your tool should slide into the printed pocket comfortably.`,
+      "Positive — looser fit. Use for soft or rubber-handled tools, or if your printer over-extrudes.",
+      "Negative — tighter fit. The first −0.3 to −0.5 mm gives a snug, hand-fit feel. Going more negative produces an interference fit (the tool wedges in).",
+      `−${TOLERANCE_BASELINE_MM} — pocket matches the trace exactly (no clearance at all). Below this value the pocket is smaller than the trace.`,
       "The tolerance polygon is always Douglas-Peucker simplified at 0.3 mm regardless of value, so Fusion gets a clean low-point-count cut.",
     ],
   },
@@ -225,12 +228,35 @@ class PicApp extends LitElement {
       if (e.key === "Escape" && this.modalField) this.modalField = null;
     };
     window.addEventListener("keydown", this._escHandler);
+
+    // Browser back/forward navigates between screens instead of leaving the
+    // app. The initial state is replaceState (not push) so back from the
+    // form still leaves the site as the user expects.
+    if (history.state == null || history.state.screen == null) {
+      history.replaceState({ screen: this.screen }, "");
+    }
+    this._popstateHandler = (e) => {
+      const target = e.state?.screen ?? "form";
+      this._fromHistory = true;
+      this.screen = target;
+    };
+    window.addEventListener("popstate", this._popstateHandler);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this.removeEventListener("show-info", this._showInfoHandler);
     window.removeEventListener("keydown", this._escHandler);
+    window.removeEventListener("popstate", this._popstateHandler);
+  }
+
+  updated(changed) {
+    if (changed.has("screen")) {
+      if (!this._fromHistory) {
+        history.pushState({ screen: this.screen }, "");
+      }
+      this._fromHistory = false;
+    }
   }
 
   render() {
