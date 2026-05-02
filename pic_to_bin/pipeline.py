@@ -95,6 +95,7 @@ def run_pipeline(
     tolerance: float = 0.0,
     axial_tolerance: float = 1.0,
     phone_height: float = DEFAULT_PHONE_HEIGHT_MM,
+    tool_taper: str = "top",
     gap: float = 3.0,
     bin_margin: float = 0.0,
     max_units: int = 7,
@@ -207,6 +208,7 @@ def run_pipeline(
                     mask_erode_mm=mask_erode,
                     tool_height_mm=tool_height_mm,
                     phone_height_mm=phone_height,
+                    tool_taper=tool_taper,
                     finger_slots=slots,
                 )
                 dxf_paths.append(result["dxf_path"])
@@ -401,6 +403,15 @@ examples:
              "phone_height / (phone_height - tool_height/2). Lower values "
              "apply more compensation; 0 disables compensation.")
     parser.add_argument(
+        "--tool-taper", choices=["top", "uniform", "bottom"], default="top",
+        help="Tool's side profile, used to pick the right z for parallax "
+             "compensation (default: top). "
+             "'top' = widens going up (screwdrivers, pliers, hammers — most "
+             "hand tools); 'uniform' = vertical sides (boxy multimeters, "
+             "USB drives); 'bottom' = tapers inward going up (Zircon stud "
+             "finder, computer mouse). 'top' and 'uniform' apply the full "
+             "shrink; 'bottom' applies none.")
+    parser.add_argument(
         "--gap", type=float, default=3.0,
         help="Minimum gap between tools in mm (default: 3.0)")
     parser.add_argument(
@@ -495,6 +506,7 @@ examples:
         tolerance=args.tolerance,
         axial_tolerance=args.axial_tolerance,
         phone_height=args.phone_height,
+        tool_taper=args.tool_taper,
         gap=args.gap,
         bin_margin=args.bin_margin,
         max_units=args.max_units,

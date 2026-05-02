@@ -776,6 +776,7 @@ def trace_from_mask(
     output_dir: str = "generated",
     tool_height_mm: float = 0.0,
     phone_height_mm: float = 0.0,
+    tool_taper: str = "top",
     finger_slots: bool = True,
 ) -> dict:
     """Run cleanup → straighten → vectorize → export on a pre-segmented mask.
@@ -809,25 +810,44 @@ def trace_from_mask(
     scale = 25.4 / dpi
 
     # Parallax compensation: a tool of thickness tool_height_mm photographed
-    # from height phone_height_mm appears larger than reality because its top
-    # surface sits closer to the camera than the marker plane. The homography
-    # corrects perspective on the marker plane only; objects above z=0 still
-    # get inflated by H/(H-z). For a flat-bottomed tool with vertical-ish
-    # sides (most hand tools — screwdrivers, pliers, hammers, wrenches), the
-    # silhouette as seen from overhead is bounded by the top face: the bottom
-    # edge is hidden behind it, so the visible outline tracks z=tool_height,
-    # not the mid-height. Using half-height under-compensates by ~2-3% per
-    # axis, which is invisible on short dimensions but several mm on long
-    # ones. Shrink mm-per-pixel by the inverse so every downstream polygon
-    # (inner, tolerance, slot) lands at true mm.
+    # from height phone_height_mm appears larger than reality because surfaces
+    # above z=0 sit closer to the camera and get inflated by H/(H-z). The
+    # homography corrects perspective on the marker plane only.
+    #
+    # Which z to use depends on the tool's profile (tool_taper):
+    #
+    #   "top"     — tool widens going up (screwdrivers, pliers, hammers,
+    #               wrenches with flared handles). The top face occludes
+    #               the bottom edge, so the visible silhouette tracks z =
+    #               tool_height_mm. Shrink fully.
+    #   "uniform" — vertical sides (boxy multimeters, batteries, USB drives).
+    #               Top and bottom outlines are identical, but the top face
+    #               is closer to the camera and thus projects larger; the
+    #               silhouette is the top face projection. Shrink fully —
+    #               same factor as "top".
+    #   "bottom"  — tool tapers inward going up (Zircon stud finder, mouse,
+    #               anything with a wide base and a narrower top). The
+    #               bottom outline is wider than the projected top, so the
+    #               visible silhouette tracks z = 0. No shrink.
+    #
+    # Defaults to "top" because the original target tools (screwdrivers /
+    # pliers / wrenches) all fall in that bucket and that was the only
+    # behavior before this option existed.
     if phone_height_mm > 0 and tool_height_mm > 0:
-        z = tool_height_mm
-        if z < phone_height_mm:
+        if tool_taper == "bottom":
+            z = 0.0
+        else:  # "top" or "uniform"
+            z = tool_height_mm
+        if 0 < z < phone_height_mm:
             parallax_factor = (phone_height_mm - z) / phone_height_mm
             scale *= parallax_factor
             print(f"  Parallax compensation: phone={phone_height_mm:.0f}mm, "
-                  f"tool={tool_height_mm:.1f}mm, factor={parallax_factor:.4f} "
+                  f"tool={tool_height_mm:.1f}mm, taper={tool_taper}, "
+                  f"factor={parallax_factor:.4f} "
                   f"({(1 - parallax_factor) * 100:.1f}% shrink)")
+        else:
+            print(f"  Parallax compensation: skipped "
+                  f"(taper={tool_taper}, z={z:.0f}mm)")
 
     if abs(tolerance_mm) > 0.001:
         sign = "expand" if tolerance_mm > 0 else "shrink"

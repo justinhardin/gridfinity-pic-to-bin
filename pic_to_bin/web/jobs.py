@@ -306,6 +306,7 @@ _PIPELINE_PARAM_KEYS = {
     "tolerance",
     "axial_tolerance",
     "phone_height",
+    "tool_taper",
     "gap",
     "bin_margin",
     "max_units",

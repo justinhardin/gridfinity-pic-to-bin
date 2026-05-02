@@ -14,6 +14,7 @@ const FORM_DEFAULTS = {
   tolerance: 0.0,
   axial_tolerance: 1.0,
   phone_height: 482.0,
+  tool_taper: "top",
   gap: 3.0,
   bin_margin: 0.0,
   max_units: 7,
@@ -31,6 +32,7 @@ const FORM_DEFAULTS = {
 // Everything else is layout-only (cheap; cached DXFs reused).
 const TRACE_REQUIRED_FIELDS = new Set([
   "phone_height",
+  "tool_taper",
   "tolerance",
   "axial_tolerance",
   "slots",
@@ -68,6 +70,17 @@ const FIELD_INFO = {
       "How far the phone camera was from the paper when you took the photo.",
       "A tool that sits above the paper appears slightly larger in the photo than it really is. The pipeline compensates by scaling the trace down by phone_height / (phone_height − tool_height/2).",
       "482 mm is a reasonable default for hand-held overhead shots. Lower values apply more aggressive compensation; set to 0 to disable parallax correction entirely.",
+    ],
+  },
+  tool_taper: {
+    title: "Tool side profile",
+    hint: "Where the tool is widest, viewed from the side. Affects parallax.",
+    body: [
+      "Pick the side-profile shape closest to your tool. The pipeline uses this to decide which height to use when compensating for parallax — tools that taper inward (wider at the bottom) need no compensation, while tools that flare outward at the top need the full correction.",
+      "Widest at top — handles, grips, anything that flares out at the top. Most hand tools fall here: screwdrivers, pliers, hammers, wrenches.",
+      "Uniform — vertical sides, top outline matches bottom outline. Boxy multimeters, batteries, USB drives, blocks of metal.",
+      "Widest at bottom — tapers inward going up. Zircon stud finders, computer mice, phone cases, tape-measure cases.",
+      "Picking the wrong option makes the trace a few percent too small or too big, with the error growing with tool height. For a 30 mm-tall tool at the default 482 mm phone height, the swing between options is around 6%.",
     ],
   },
   tolerance: {
@@ -599,6 +612,7 @@ class PicForm extends LitElement {
           })}
           ${this._renderField("phone_height", "number", { step: 1 })}
         </div>
+        ${this._renderTaperField()}
       </div>
 
       <div class="card">
@@ -674,6 +688,69 @@ class PicForm extends LitElement {
             <button class="remove" type="button" @click=${() => this._remove(i)}>Remove</button>
           </div>
         `)}
+      </div>
+    `;
+  }
+
+  _renderTaperField() {
+    const info = FIELD_INFO.tool_taper;
+    const value = this.formValues.tool_taper;
+    // Each option: a side-profile silhouette sitting on a "ground line"
+    // (the paper). Polygon points are tweaked to match the description.
+    const options = [
+      {
+        value: "top",
+        label: "Widest at top",
+        sub: "Screwdrivers, pliers, hammers",
+        // Trapezoid wider at top, narrower at bottom.
+        points: "16,32 24,32 32,12 8,12",
+      },
+      {
+        value: "uniform",
+        label: "Uniform",
+        sub: "Boxy multimeter, USB drive",
+        points: null,  // rectangle — drawn as <rect> instead of <polygon>
+      },
+      {
+        value: "bottom",
+        label: "Widest at bottom",
+        sub: "Stud finder, mouse, gadget",
+        // Trapezoid wider at bottom, narrower at top.
+        points: "8,32 32,32 24,12 16,12",
+      },
+    ];
+    return html`
+      <div class="field taper-field">
+        <label class="field-label">
+          ${info.title}
+          <button class="info-btn" type="button"
+                  @click=${() => showInfo(this, "tool_taper")}
+                  aria-label="Explain ${info.title}">i</button>
+        </label>
+        <div class="taper-options" role="radiogroup">
+          ${options.map(o => html`
+            <label class="taper-option ${value === o.value ? "selected" : ""}">
+              <input type="radio" name="tool_taper" .value=${o.value}
+                     .checked=${value === o.value}
+                     @change=${() => this._emit("tool_taper", o.value)}>
+              <svg viewBox="0 0 40 40" width="56" height="56" aria-hidden="true">
+                <line x1="2" y1="33" x2="38" y2="33"
+                      stroke="currentColor" stroke-width="1" opacity="0.4"/>
+                ${o.points
+                  ? html`<polygon points=${o.points} fill="currentColor"
+                                  fill-opacity="0.15" stroke="currentColor"
+                                  stroke-width="1.6" stroke-linejoin="round"/>`
+                  : html`<rect x="10" y="12" width="20" height="20"
+                               fill="currentColor" fill-opacity="0.15"
+                               stroke="currentColor" stroke-width="1.6"
+                               stroke-linejoin="round"/>`}
+              </svg>
+              <span class="taper-label">${o.label}</span>
+              <span class="taper-sub">${o.sub}</span>
+            </label>
+          `)}
+        </div>
+        <span class="hint">${info.hint}</span>
       </div>
     `;
   }
