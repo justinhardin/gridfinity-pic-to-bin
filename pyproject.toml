@@ -25,10 +25,18 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "httpx",
+]
+web = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "sse-starlette",
 ]
 
 [project.scripts]
 pic-to-bin = "pic_to_bin.pipeline:main"
+pic-to-bin-web = "pic_to_bin.web.server:cli"
 generate-phone-template = "pic_to_bin.phone_template:main"
 preprocess-phone = "pic_to_bin.phone_preprocess:main"
 trace-tool = "pic_to_bin.trace_tool:main"

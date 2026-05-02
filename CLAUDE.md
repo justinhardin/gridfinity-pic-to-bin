@@ -152,9 +152,50 @@ prepare-bin generated/combined_layout.dxf --tool-height 17.0
 # Install Fusion 360 script + add-in (idempotent)
 pic-to-bin-fusion install
 
+# Web app (multi-user; FastAPI + Lit frontend)
+pip install -e ".[web]"
+pic-to-bin-web --port 8000           # opens at http://localhost:8000
+python -m pic_to_bin.web.vendor_lit  # optional: vendor Lit locally
+
 # Run tests
 python -m pytest tests/ -v
 ```
+
+## Web App
+
+`pic_to_bin/web/` is a FastAPI wrapper around `run_pipeline()` (the
+library-callable form of the CLI's `main()`). Designed for multi-user from
+day one:
+
+- **Per-job UUID dirs** under `web_jobs/<uuid>/` so concurrent submissions
+  cannot collide. Files survive server restart so the layout-preview / re-do
+  flow still works after a reboot. A background sweep deletes terminal jobs
+  older than `--job-ttl-hours` (default 24h).
+- **GPU semaphore** (`threading.Semaphore(1)` in `JobManager`) serializes the
+  SAM2 step across concurrent jobs so the second user's submission queues
+  rather than OOMing the GPU. SAM2 weights load once at process startup and
+  stay resident.
+- **Two-phase pipeline**: submit runs Phase A (preprocess + trace + layout) and
+  stops with `stop_after="layout"`; the user reviews `layout_preview.png` and
+  clicks Proceed (Phase B = `prepare_bin`) or Re-do. Layout-only re-runs use
+  `skip_trace=True` to re-use cached per-tool DXFs (cheap; seconds). Re-runs
+  that change trace-affecting params re-trace from the photos.
+- **Server-Sent Events** stream `ProgressEvent`s from worker threads to the
+  browser via `loop.call_soon_threadsafe`. The job's event log is replayed on
+  late connections.
+- **Frontend stack**: Lit components served as static files. Default
+  `index.html` import map points at `esm.sh`; running
+  `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into
+  `static/` and rewrites the import map for a fully self-contained deploy.
+- **Future hooks designed in**: OAuth (FastAPI dependency `get_current_user`
+  default-stubbed to anonymous), LLM-driven re-do (`/jobs/{id}/redo` body has
+  `mode: "params" | "llm"` slot, only `"params"` implemented), printables.com
+  search (form has `part_number` / `description` slots, no endpoint yet).
+
+Endpoints: `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events` (SSE),
+`POST /jobs/{id}/proceed`, `POST /jobs/{id}/redo`,
+`GET /jobs/{id}/artifacts/{name}` (whitelisted: `layout_preview.png`,
+`combined_layout.dxf`, `bin_config.json`).
 
 ## Error Handling
 

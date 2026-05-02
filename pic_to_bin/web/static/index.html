@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pic-to-Bin</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <!--
+    Lit is loaded via this import map.
+
+    Default: CDN (https://esm.sh) so the app works without any extra setup.
+
+    To vendor Lit locally (no third-party dependency at runtime), run:
+        python -m pic_to_bin.web.vendor_lit
+    That command downloads lit-all.min.js into pic_to_bin/web/static/ and
+    rewrites this import map to "/static/lit-all.min.js".
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "lit": "https://esm.sh/lit@3.2.1",
+        "lit/decorators.js": "https://esm.sh/lit@3.2.1/decorators.js"
+      }
+    }
+  </script>
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Pic-to-Bin</h1>
+    <p>Phone-camera photos → printable Gridfinity bin</p>
+  </header>
+  <main>
+    <pic-app></pic-app>
+  </main>
+</body>
+</html>

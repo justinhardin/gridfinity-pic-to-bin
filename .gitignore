@@ -5,6 +5,7 @@
 
 # Pipeline output
 generated/
+web_jobs/
 *.pdf
 *.dxf
 *.svg

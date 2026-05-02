@@ -14,6 +14,15 @@ Minimal usage:
 Full usage:
     pic-to-bin photo1.jpg photo2.jpg --tool-height 0=17 --tool-height 1=14 --paper-size letter
     (default paper size is legal)
+
+Library usage (web app, tests, notebooks):
+    from pic_to_bin.pipeline import run_pipeline, ProgressEvent
+    result = run_pipeline(
+        image_paths=[Path("photo.jpg")],
+        tool_heights=17.0,
+        output_dir=Path("web_jobs/abc123"),
+        progress_cb=lambda ev: print(ev),
+    )
 """
 
 import argparse
@@ -21,7 +30,9 @@ import os
 import shutil
 import stat
 import sys
+from dataclasses import dataclass, asdict
 from pathlib import Path
+from typing import Callable, Literal, Optional
 
 from pic_to_bin.phone_preprocess import (
     preprocess_phone_image,
@@ -33,6 +44,256 @@ from pic_to_bin.refine_trace import refine_trace
 from pic_to_bin.layout_tools import layout_tools, GridSizeError
 from pic_to_bin.prepare_bin import prepare_bin
 
+
+DEFAULT_PHONE_HEIGHT_MM = 482.0
+
+
+# ---------------------------------------------------------------------------
+# Progress events (for web UI / programmatic callers)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProgressEvent:
+    """Structured progress signal emitted by run_pipeline().
+
+    step is one of: "preprocess", "trace", "layout", "bin_config", "done",
+    or "error" for per-image failures that the pipeline recovered from.
+    """
+    step: str
+    message: str = ""
+    fraction: float = 0.0
+    image_index: Optional[int] = None
+    image_total: Optional[int] = None
+    image_name: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+ProgressCallback = Callable[[ProgressEvent], None]
+StopAfter = Literal["layout", "all"]
+
+
+# ---------------------------------------------------------------------------
+# Programmatic entry point
+# ---------------------------------------------------------------------------
+
+def run_pipeline(
+    image_paths,
+    tool_heights,
+    *,
+    output_dir,
+    paper_size: str = "legal",
+    tolerance: float = 1.0,
+    phone_height: float = DEFAULT_PHONE_HEIGHT_MM,
+    gap: float = 3.0,
+    bin_margin: float = 0.0,
+    max_units: int = 7,
+    min_units: int = 1,
+    height_units: Optional[int] = None,
+    stacking: bool = True,
+    slots: bool = True,
+    straighten_threshold: float = 45.0,
+    max_refine_iterations: int = 5,
+    max_concavity_depth: float = 3.0,
+    mask_erode: float = 0.3,
+    sam_model: str = "sam2.1_l.pt",
+    skip_trace: bool = False,
+    stop_after: StopAfter = "all",
+    progress_cb: Optional[ProgressCallback] = None,
+) -> dict:
+    """Run the pic-to-bin pipeline non-interactively.
+
+    Args mirror the CLI flags. ``stop_after="layout"`` stops after the
+    layout-preview step (used by the web app's preview-then-proceed flow).
+    Re-running with ``skip_trace=True`` re-uses cached per-tool DXFs.
+
+    Returns a dict::
+
+        {
+          "dxf_paths":      [...],   # per-tool trace DXFs
+          "combined_dxf":   "...",   # combined_layout.dxf
+          "layout_preview": "...",   # layout_preview.png
+          "layout_result":  {...},   # full dict from layout_tools()
+          "grid_units_x":   int,
+          "grid_units_y":   int,
+          "bin_config":     "..." | None,  # bin_config.json (None if stop_after=="layout")
+        }
+
+    Raises ``GridSizeError`` (tools don't fit in max_units), ``RuntimeError``
+    (no DXFs produced), and unexpected exceptions from layout/prepare_bin.
+    Per-image preprocessing/trace errors are reported via the progress
+    callback as ``step="error"`` events and the pipeline continues with the
+    surviving images.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_paths = [Path(p) for p in image_paths]
+
+    def _emit(event: ProgressEvent) -> None:
+        if progress_cb is not None:
+            progress_cb(event)
+
+    # --- Steps 1-2: Preprocess + Trace -------------------------------------
+    dxf_paths: list[str] = []
+    if skip_trace:
+        print("\n-- Skipping trace (--skip-trace), looking for existing DXFs --")
+        _emit(ProgressEvent(step="trace", message="Reusing cached traces", fraction=0.5))
+        for img in image_paths:
+            tool_dir = output_dir / img.stem
+            # Phone preprocessing renames the rectified image to "{stem}_rectified.png",
+            # so the trace_tool output is "{stem}_rectified_trace.dxf". Glob to match
+            # both the phone-pipeline name and the legacy "{stem}_trace.dxf".
+            candidates = sorted(tool_dir.glob("*_trace.dxf"))
+            if candidates:
+                dxf_paths.append(str(candidates[0]))
+                print(f"  Found: {candidates[0]}")
+            else:
+                print(f"  WARNING: no *_trace.dxf in {tool_dir}, skipping {img.name}")
+    else:
+        print("\n" + "=" * 60)
+        print("STEP 1/3: Phone preprocessing + Tracing tool outlines")
+        print("=" * 60)
+        n = len(image_paths)
+        for idx, img in enumerate(image_paths):
+            tool_output_dir = output_dir / img.stem
+            try:
+                # Phone preprocessing
+                print(f"\n--- Preprocessing {img.name} ---")
+                _emit(ProgressEvent(
+                    step="preprocess",
+                    message=f"Preprocessing {img.name}",
+                    image_index=idx, image_total=n, image_name=img.name,
+                    fraction=idx / max(n, 1),
+                ))
+                pp = preprocess_phone_image(
+                    str(img),
+                    paper_size=paper_size,
+                    output_dir=str(tool_output_dir),
+                )
+                rectified_img = Path(pp["rectified_image_path"])
+                dpi = round(pp["effective_dpi"])
+                print(f"  Phone mode: {pp['markers_detected']}/8 markers, "
+                      f"effective DPI: {dpi}")
+
+                # Trace
+                print(f"\n--- Tracing {img.name} ---")
+                _emit(ProgressEvent(
+                    step="trace",
+                    message=f"Tracing {img.name}",
+                    image_index=idx, image_total=n, image_name=img.name,
+                    fraction=(idx + 0.5) / max(n, 1),
+                ))
+                tool_height_mm = _resolve_tool_height(tool_heights, idx)
+                result = refine_trace(
+                    image_path=str(rectified_img),
+                    dpi=dpi,
+                    tolerance_mm=tolerance,
+                    straighten_threshold=straighten_threshold,
+                    output_dir=str(tool_output_dir),
+                    max_iterations=max_refine_iterations,
+                    max_concavity_depth_mm=max_concavity_depth,
+                    sam_model=sam_model,
+                    mask_erode_mm=mask_erode,
+                    tool_height_mm=tool_height_mm,
+                    phone_height_mm=phone_height,
+                    finger_slots=slots,
+                )
+                dxf_paths.append(result["dxf_path"])
+                iters = result.get("refinement_iterations", 1)
+                conv = result.get("refinement_converged", True)
+                if iters > 1:
+                    status = "converged" if conv else "max iterations"
+                    print(f"  Refined in {iters} iterations ({status})")
+
+            except MarkerDetectionError as e:
+                msg = f"ERROR preprocessing {img.name}: {e}"
+                print(f"\n{msg}\n")
+                _emit(ProgressEvent(
+                    step="error", message=msg,
+                    image_index=idx, image_total=n, image_name=img.name,
+                ))
+            except ScaleInconsistencyError as e:
+                msg = f"ERROR (scale) {img.name}: {e}"
+                print(f"\n{msg}\n")
+                _emit(ProgressEvent(
+                    step="error", message=msg,
+                    image_index=idx, image_total=n, image_name=img.name,
+                ))
+            except Exception as e:
+                msg = f"ERROR processing {img.name}: {e}"
+                print(f"\n{msg}\n")
+                _emit(ProgressEvent(
+                    step="error", message=msg,
+                    image_index=idx, image_total=n, image_name=img.name,
+                ))
+
+    if not dxf_paths:
+        raise RuntimeError(
+            "No DXF traces produced. Check that photos contain a visible, "
+            "well-lit ArUco template and that the template was printed at "
+            "100% scale."
+        )
+
+    # --- Step 3: Layout packing -------------------------------------------
+    print("\n" + "=" * 60)
+    print("STEP 2/3: Packing layout")
+    print("=" * 60)
+    _emit(ProgressEvent(
+        step="layout",
+        message=f"Packing {len(dxf_paths)} tool(s) into bin grid",
+        fraction=0.0,
+    ))
+    layout_result = layout_tools(
+        dxf_paths=dxf_paths,
+        gap_mm=gap,
+        max_units=max_units,
+        min_units=min_units,
+        bin_margin_mm=bin_margin,
+        output_dir=str(output_dir),
+    )
+    _emit(ProgressEvent(
+        step="layout",
+        message=(
+            f"Layout: {layout_result['grid_units_x']}x"
+            f"{layout_result['grid_units_y']} gridfinity units"
+        ),
+        fraction=1.0,
+    ))
+
+    result = {
+        "dxf_paths": dxf_paths,
+        "combined_dxf": layout_result["combined_dxf_path"],
+        "layout_preview": layout_result["preview_path"],
+        "layout_result": layout_result,
+        "grid_units_x": layout_result["grid_units_x"],
+        "grid_units_y": layout_result["grid_units_y"],
+        "bin_config": None,
+    }
+
+    if stop_after == "layout":
+        return result
+
+    # --- Step 4: Bin config ------------------------------------------------
+    print("\n" + "=" * 60)
+    print("STEP 3/3: Generating bin config")
+    print("=" * 60)
+    _emit(ProgressEvent(step="bin_config", message="Generating bin config", fraction=0.5))
+    config_path = prepare_bin(
+        dxf_path=layout_result["combined_dxf_path"],
+        tool_heights=tool_heights,
+        height_units=height_units,
+        stacking_lip=stacking,
+        output_path=str(output_dir / "bin_config.json"),
+    )
+    result["bin_config"] = config_path
+    _emit(ProgressEvent(step="done", message="Done", fraction=1.0))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Existing-output helpers (CLI-only; web caller manages its own job dirs)
+# ---------------------------------------------------------------------------
 
 def check_existing_output(output_dir: Path, skip_trace: bool) -> bool:
     """Check if generated output exists and prompt user to confirm deletion."""
@@ -80,6 +341,10 @@ def clear_generated_dir(output_dir: Path) -> None:
             item.unlink()
     print(f"Cleared {output_dir}/")
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -175,7 +440,6 @@ examples:
     args = parser.parse_args()
 
     # Confirm parallax-compensation default if --phone-height was omitted.
-    DEFAULT_PHONE_HEIGHT_MM = 482.0
     if args.phone_height is None:
         response = input(
             f"You haven't specified --phone-height. "
@@ -188,105 +452,45 @@ examples:
 
     output_dir = Path(args.output_dir)
 
-    # ── Check for existing output ──────────────────────────────────────
     if not check_existing_output(output_dir, args.skip_trace):
         sys.exit(0)
 
-    # ── Step 0: Collect images ─────────────────────────────────────────
     image_sources = args.images if args.images else ["all_images"]
     image_paths = _collect_images(image_sources)
     print(f"Found {len(image_paths)} image(s): "
           + ", ".join(p.name for p in image_paths))
 
-    # Parse tool heights early so the trace step can apply parallax compensation.
     tool_heights = _parse_tool_height_args(args.tool_heights)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Steps 1-2: Preprocess + Trace each image ──────────────────────
-    dxf_paths = []
-    if args.skip_trace:
-        print("\n-- Skipping trace (--skip-trace), looking for existing DXFs --")
-        for img in image_paths:
-            dxf = output_dir / img.stem / f"{img.stem}_trace.dxf"
-            if dxf.exists():
-                dxf_paths.append(str(dxf))
-                print(f"  Found: {dxf}")
-            else:
-                print(f"  WARNING: {dxf} not found, skipping {img.name}")
-    else:
-        print("\n" + "=" * 60)
-        print("STEP 1/3: Phone preprocessing + Tracing tool outlines")
-        print("=" * 60)
-        for idx, img in enumerate(image_paths):
-            tool_output_dir = output_dir / img.stem
-            try:
-                # Step 1: Phone preprocessing
-                print(f"\n--- Preprocessing {img.name} ---")
-                pp = preprocess_phone_image(
-                    str(img),
-                    paper_size=args.paper_size,
-                    output_dir=str(tool_output_dir),
-                )
-                rectified_img = Path(pp["rectified_image_path"])
-                dpi = round(pp["effective_dpi"])
-                print(f"  Phone mode: {pp['markers_detected']}/8 markers, "
-                      f"effective DPI: {dpi}")
+    kwargs = dict(
+        image_paths=image_paths,
+        tool_heights=tool_heights,
+        output_dir=output_dir,
+        paper_size=args.paper_size,
+        tolerance=args.tolerance,
+        phone_height=args.phone_height,
+        gap=args.gap,
+        bin_margin=args.bin_margin,
+        max_units=args.max_units,
+        min_units=args.min_units,
+        height_units=args.height_units,
+        stacking=args.stacking,
+        slots=args.slots,
+        straighten_threshold=args.straighten_threshold,
+        max_refine_iterations=args.max_refine_iterations,
+        max_concavity_depth=args.max_concavity_depth,
+        mask_erode=args.mask_erode,
+        sam_model=args.sam_model,
+        skip_trace=args.skip_trace,
+    )
 
-                # Step 2: Trace (SAM2 segmentation on rectified image)
-                print(f"\n--- Tracing {img.name} ---")
-                tool_height_mm = _resolve_tool_height(tool_heights, idx)
-                result = refine_trace(
-                    image_path=str(rectified_img),
-                    dpi=dpi,
-                    tolerance_mm=args.tolerance,
-                    straighten_threshold=args.straighten_threshold,
-                    output_dir=str(tool_output_dir),
-                    max_iterations=args.max_refine_iterations,
-                    max_concavity_depth_mm=args.max_concavity_depth,
-                    sam_model=args.sam_model,
-                    mask_erode_mm=args.mask_erode,
-                    tool_height_mm=tool_height_mm,
-                    phone_height_mm=args.phone_height,
-                    finger_slots=args.slots,
-                )
-                dxf_paths.append(result["dxf_path"])
-                iters = result.get("refinement_iterations", 1)
-                conv = result.get("refinement_converged", True)
-                if iters > 1:
-                    status = "converged" if conv else "max iterations"
-                    print(f"  Refined in {iters} iterations ({status})")
-
-            except MarkerDetectionError as e:
-                print(f"\nERROR preprocessing {img.name}: {e}\n")
-            except ScaleInconsistencyError as e:
-                print(f"\nERROR (scale) {img.name}: {e}\n")
-            except Exception as e:
-                print(f"\nERROR processing {img.name}: {e}\n")
-
-    if not dxf_paths:
-        print("No DXF traces produced. Exiting.")
-        sys.exit(1)
-
-    # ── Step 3: Layout packing ─────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("STEP 2/3: Packing layout")
-    print("=" * 60)
-
-    max_units = args.max_units
-    min_units = args.min_units
     try:
-        layout_result = layout_tools(
-            dxf_paths=dxf_paths,
-            gap_mm=args.gap,
-            max_units=max_units,
-            min_units=min_units,
-            bin_margin_mm=args.bin_margin,
-            output_dir=str(output_dir),
-        )
+        result = run_pipeline(**kwargs)
     except GridSizeError as e:
         required = max(e.required_x, e.required_y)
-        print(f"\nTools don't fit in a {max_units}x{max_units} grid. "
+        print(f"\nTools don't fit in a {args.max_units}x{args.max_units} grid. "
               f"Smallest layout found: {e.required_x}x{e.required_y} units "
               f"({e.required_x * 42}x{e.required_y * 42}mm).")
         try:
@@ -297,39 +501,22 @@ examples:
         if answer != "y":
             print("Cancelled.")
             sys.exit(0)
-        layout_result = layout_tools(
-            dxf_paths=dxf_paths,
-            gap_mm=args.gap,
-            max_units=required,
-            min_units=min_units,
-            bin_margin_mm=args.bin_margin,
-            output_dir=str(output_dir),
-        )
+        kwargs["max_units"] = required
+        # Re-using cached DXFs — we already ran preprocess+trace successfully.
+        kwargs["skip_trace"] = True
+        result = run_pipeline(**kwargs)
+    except RuntimeError as e:
+        print(f"\n{e}")
+        sys.exit(1)
 
-    combined_dxf = layout_result["combined_dxf_path"]
-
-    # ── Step 4: Generate bin config ────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("STEP 3/3: Generating bin config")
-    print("=" * 60)
-
-    config_path = prepare_bin(
-        dxf_path=combined_dxf,
-        tool_heights=tool_heights,
-        height_units=args.height_units,
-        stacking_lip=args.stacking,
-        output_path=str(output_dir / "bin_config.json"),
-    )
-
-    # ── Summary ────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("DONE")
     print("=" * 60)
-    print(f"  Traces:  {len(dxf_paths)} tool(s)")
-    print(f"  Layout:  {layout_result['grid_units_x']}x"
-          f"{layout_result['grid_units_y']} gridfinity units")
-    print(f"  Config:  {config_path}")
-    print(f"  Preview: {layout_result['preview_path']}")
+    print(f"  Traces:  {len(result['dxf_paths'])} tool(s)")
+    print(f"  Layout:  {result['grid_units_x']}x"
+          f"{result['grid_units_y']} gridfinity units")
+    print(f"  Config:  {result['bin_config']}")
+    print(f"  Preview: {result['layout_preview']}")
     print(f"\nNext: Open Fusion 360 -> Scripts -> Run fusion_bin_script")
 
 
