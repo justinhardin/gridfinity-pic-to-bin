@@ -1,8 +1,42 @@
 # Gridfinity Pic-to-Bin — Phone Camera to Gridfinity Bin
 
+## Current state (2026-05-01 EOD)
+
+Active branch: **`web-app`** (HEAD `e4782f1`). Pushed to `origin/web-app` —
+the master branch is unchanged from before the web work started. To resume:
+
+```bash
+git checkout web-app
+pip install -e ".[web]"          # pulls fastapi, uvicorn[standard], sse-starlette, python-multipart
+pic-to-bin-web --port 8000       # http://localhost:8000
+```
+
+**What's working end-to-end on `web-app`:**
+- CLI pipeline (`pic-to-bin`) plus Python-callable `pipeline.run_pipeline()`
+  with progress callbacks and a `stop_after="layout"` checkpoint.
+- FastAPI web wrapper (`pic_to_bin/web/`) with multi-user job queue, SSE
+  progress streaming, two-phase layout-then-bin flow with cheap re-do.
+- Lit-based frontend with drag-drop dropzone, per-image tool-height inputs,
+  info-modal field documentation, browser-back navigation between screens.
+- 1:1-scale fit-test PDF + SVG outputs alongside the screen-PNG preview so
+  users can print and verify fit before 3D printing.
+- 2 mm uniform tolerance baseline + 1 mm axial-tolerance default
+  (PCA-stretched along the tool's principal axis to compensate for
+  SAM2 tip under-detection).
+
+**Last session's open thread:** none — everything committed and tested
+(45/45 passing). Reasonable next-session starters:
+- More fit-test refinement if the 2 mm + 1 mm axial defaults need
+  further tuning per user's print results.
+- Stub OAuth / Printables.com / LLM-redo plumbing that the plan calls
+  out as future hooks.
+- UI: `pic-progress` substep rendering still shows the most recent
+  per-image event only — could be smarter about per-image lifecycle
+  (preprocess → trace done → ✓).
+
 ## Project Overview
 
-Generate 3D-printable gridfinity bins with custom tool cutouts from **phone camera photos**. Uses a printed ArUco marker template for perspective correction and automatic scale calibration. After preprocessing, SAM2 segmentation and vectorization extract the tool outline; layout packing and a Fusion 360 add-in/script turn that into a parametric bin with pockets, finger slots, and a stacking-lip-compatible base.
+Generate 3D-printable gridfinity bins with custom tool cutouts from **phone camera photos**. Uses a printed ArUco marker template for perspective correction and automatic scale calibration. After preprocessing, SAM2 segmentation and vectorization extract the tool outline; layout packing and a Fusion 360 add-in/script turn that into a parametric bin with pockets, finger slots, and a stacking-lip-compatible base. A FastAPI + Lit web wrapper exposes the same pipeline through a browser.
 
 ## Architecture — Phone-Camera Pipeline
 
@@ -13,37 +47,51 @@ Generate 3D-printable gridfinity bins with custom tool cutouts from **phone came
 Phone Preprocessing (phone_preprocess.py)
     [ArUco detection → homography → perspective warp → scale calibration → crop]
          ↓  Rectified image + effective DPI
-Trace Generation (trace_tool.py, refine_trace.py)
-    [SAM2 segmentation → iterative cleanup → potrace vectorization → SVG/DXF]
+Trace Generation (trace_tool.py, refine_trace.py, trace_export.py)
+    [SAM2 segmentation → iterative cleanup → potrace → uniform offset →
+     axial PCA stretch → Douglas-Peucker → SVG/DXF]
          ↓  SVG + DXF (inner trace + simplified tolerance outline + finger slot)
 Layout Packing (layout_tools.py)
-    [DXF reading → rotation + mirror → polygon collision packing → combined DXF]
+    [DXF reading → rotation + mirror → polygon collision packing → combined DXF
+     → layout_preview.png + 1:1-scale layout_actual_size.pdf / .svg for fit-testing]
          ↓
 Bin Config Generation (prepare_bin.py)
     [center cutout in bin → JSON config]
          ↓
-Fusion 360 Add-In / Script (pic_to_bin_addin/ or pic_to_bin_script/)
+EITHER:  Fusion 360 Add-In / Script (pic_to_bin_addin/ or pic_to_bin_script/)
     [parametric bin body + ABS-white appearance + pockets + slots + base pads]
          ↓  STL / STEP / PNG preview
+OR:     Web app (pic_to_bin/web/) — FastAPI + Lit
+    [drag-drop photos → SSE-streamed progress → preview → proceed/redo →
+     downloads (PNG, PDF/SVG fit-test, DXF, JSON for the Fusion add-in)]
 ```
 
 ## Directory Layout
 
 ```
 gridfinity-pic-to-bin/
-    pyproject.toml
+    pyproject.toml                   # [web] optional dep group; pic-to-bin-web script
     pic_to_bin/                      # Python package
         __init__.py
         phone_template.py            # ArUco template PDF generation
         phone_preprocess.py          # Marker detection, homography, warping
-        pipeline.py                  # Main orchestrator (pic-to-bin CLI)
+        pipeline.py                  # CLI main() + library run_pipeline()
         trace_tool.py                # SAM2 segmentation + cleanup + vectorize
         refine_trace.py              # Iterative cleanup refinement
-        trace_export.py              # SVG/DXF export (always-simplified tolerance poly)
+        trace_export.py              # SVG/DXF export, axial-stretch tolerance
         validate_trace.py            # Trace validation
-        layout_tools.py              # Layout packing
+        layout_tools.py              # Layout packing + fit-test PDF/SVG generation
         prepare_bin.py               # Centering + Fusion config generation
         fusion_install.py            # Installs script AND add-in into Fusion
+        web/                         # FastAPI + Lit web wrapper
+            __init__.py
+            jobs.py                  # JobManager: UUID registry, GPU semaphore, SSE
+            server.py                # FastAPI routes + uvicorn cli()
+            vendor_lit.py            # `python -m … vendor_lit` to vendor Lit locally
+            static/
+                index.html           # Importmap-based Lit loader
+                app.js               # PicApp / Form / Progress / Preview / Downloads
+                styles.css
         pic_to_bin_script/           # Fusion 360 script form
             pic_to_bin.py            # script entry point
             pic_to_bin.manifest      # type: "script"
@@ -56,9 +104,12 @@ gridfinity-pic-to-bin/
                 32x32.png
                 64x64.png
     tests/
+        conftest.py
         test_phone_template.py
         test_phone_preprocess.py
-    generated/                       # Pipeline output (auto-created)
+        test_web_jobs.py             # JobManager smoke tests with mocked run_pipeline
+    generated/                       # CLI pipeline output (auto-created, gitignored)
+    web_jobs/                        # Web app per-job UUID dirs (gitignored)
 ```
 
 ## Key Files
@@ -67,12 +118,16 @@ gridfinity-pic-to-bin/
 |------|---------|
 | `phone_template.py` | Generate printable ArUco marker template PDF. CLI: `generate-phone-template` |
 | `phone_preprocess.py` | Detect ArUco markers, compute homography, warp to frontal view. CLI: `preprocess-phone` |
-| `pipeline.py` | Main orchestrator. CLI: `pic-to-bin <images> --tool-height VALUE` |
+| `pipeline.py` | CLI `pic-to-bin` + library-callable `run_pipeline()`; defines `ProgressEvent`, `TOLERANCE_BASELINE_MM`, `DEFAULT_PHONE_HEIGHT_MM` |
 | `trace_tool.py` | SAM2 segmentation + mask cleanup + vectorization |
 | `refine_trace.py` | Iterative cleanup refinement |
-| `trace_export.py` | SVG/DXF export. Always emits a Douglas-Peucker–simplified TOLERANCE polygon (the one Fusion cuts) so the inner high-res potrace polys never reach the CAD step |
-| `layout_tools.py` | Layout packing (rotation + collision-pack, packing bbox = inner+tolerance, slot allowed to overhang) |
-| `prepare_bin.py` | Centers the combined cutout (inner + tolerance + slot) in the bin, then writes the Fusion JSON config |
+| `trace_export.py` | SVG/DXF export. Always emits a Douglas-Peucker–simplified TOLERANCE polygon (the one Fusion cuts). `_axial_stretch_polygons` adds extra clearance along the tool's principal axis only |
+| `layout_tools.py` | Layout packing + `generate_preview` (PNG) + `generate_fit_test_drawing` (PDF/SVG at 1:1 mm scale for printing) |
+| `prepare_bin.py` | Centers the combined cutout in the bin, writes Fusion JSON config |
+| `web/jobs.py` | `JobManager`: UUID registry, ThreadPoolExecutor, GPU semaphore around SAM2, async SSE event fan-out, TTL sweep |
+| `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving |
+| `web/static/app.js` | Lit components: `pic-app` (root, owns modal + history), `pic-form`, `pic-progress`, `pic-preview` (with fit-test card), `pic-downloads`. `FIELD_INFO` map drives the (i) info modals |
+| `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into `static/` and rewrites the `index.html` import map |
 | `pic_to_bin_script/_bin_builder.py` | Shared Fusion build code — sketch consolidation, named timeline groups, ABS (White) appearance, STL/STEP/PNG export |
 | `pic_to_bin_script/pic_to_bin.py` | Thin script entry — picks `bin_config.json` and calls `_bin_builder.build_bin()` |
 | `pic_to_bin_addin/pic_to_bin.py` | Add-in entry — registers a "Gridfinity Pic-to-Bin" button in Solid > Create |
@@ -187,6 +242,19 @@ day one:
   `index.html` import map points at `esm.sh`; running
   `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into
   `static/` and rewrites the import map for a fully self-contained deploy.
+- **Browser back navigates between screens** instead of leaving the site.
+  `PicApp` captures each screen change via `history.pushState` in `updated()`
+  and restores from `popstate`. Initial state is `replaceState` so back from
+  the form still exits.
+- **Preview cache key**: artifact URLs use `?v=<artifactKey>` where
+  `artifactKey` is bumped exactly once when fresh artifacts arrive
+  (`_onLayoutReady` and `_onComplete`). Without this, embedding `Date.now()`
+  in the template literal caused the preview image to refetch on every
+  Lit re-render — visible flicker.
+- **Field info modals**: `FIELD_INFO` map in `app.js` has a `title`/`hint`/
+  `body[]` entry for every form field plus `tool_height` and `fit_test`. A
+  bubbling `show-info` event bubbles up to `PicApp` which renders the modal,
+  so any screen can open it.
 - **Future hooks designed in**: OAuth (FastAPI dependency `get_current_user`
   default-stubbed to anonymous), LLM-driven re-do (`/jobs/{id}/redo` body has
   `mode: "params" | "llm"` slot, only `"params"` implemented), printables.com
@@ -194,8 +262,9 @@ day one:
 
 Endpoints: `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events` (SSE),
 `POST /jobs/{id}/proceed`, `POST /jobs/{id}/redo`,
-`GET /jobs/{id}/artifacts/{name}` (whitelisted: `layout_preview.png`,
-`combined_layout.dxf`, `bin_config.json`).
+`GET /jobs/{id}/artifacts/{name}` — whitelisted artifacts:
+`layout_preview.png`, `layout_actual_size.pdf`, `layout_actual_size.svg`,
+`combined_layout.dxf`, `bin_config.json`.
 
 ## Error Handling
 
@@ -217,10 +286,16 @@ Endpoints: `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events` (SSE),
 
 ## Dependencies
 
-Same as gridfinity-scan-to-bin — all installed via `pip install gridfinity-pic-to-bin`:
+Core (always installed):
 - `ultralytics` (SAM2), `opencv-python` (ArUco + image processing), `numpy`
 - `potracer`, `svgpathtools`, `ezdxf`, `pyclipper`, `matplotlib`
 - `Pillow`, `pillow-heif`
+
+Web (`pip install -e ".[web]"`):
+- `fastapi`, `uvicorn[standard]`, `python-multipart`, `sse-starlette`
+
+Dev (`pip install -e ".[dev]"`):
+- `pytest`, `httpx`
 
 Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `opencv-contrib-python`.
 

@@ -108,19 +108,30 @@ required:
                                 (e.g. --tool-height 0=17 --tool-height 1=14)
 
 optional:
-  --paper-size {a4,letter,legal}  Template paper size (default: letter)
-  --tolerance MM                  Tolerance offset in mm (default: 0). Positive
-                                  expands the pocket past the trace (clearance
-                                  fit); negative shrinks it (interference fit).
+  --paper-size {a4,letter,legal}  Template paper size (default: legal)
+  --tolerance MM                  Extra clearance on top of a 2 mm baseline
+                                  (default: 0 = 2 mm physical clearance).
+                                  Positive = looser fit, negative = tighter,
+                                  -2 = exact-trace match.
+  --axial-tolerance MM            Extra clearance only along the tool's
+                                  principal axis (default: 1.0). Compensates
+                                  for SAM2 under-detection at tapered tips.
+  --phone-height MM               Camera height above template, mm (default: 482).
+                                  Drives the parallax-compensation scale-down.
   --gap MM                        Minimum gap between tools in layout, mm (default: 3.0)
+  --bin-margin MM                 Extra clearance from tool extent to bin wall (default: 0)
+  --min-units N                   Minimum grid size per axis (default: 1)
   --max-units N                   Max gridfinity grid size per axis (default: 7)
   --height-units N                Force bin height in gridfinity units (default: auto)
   --stacking BOOL                 Generate stacking lip (default: true). Set
                                   false for a shorter bin without the lip.
+  --slots BOOL                    Generate finger-access slots (default: true)
   --output-dir DIR                Output directory (default: generated/)
   --straighten-threshold DEG      Max degrees to auto-straighten trace (default: 45, 0=off)
   --max-refine-iterations N       SAM2 cleanup iterations (default: 5)
   --max-concavity-depth MM        Max acceptable concavity loss, mm (default: 3.0)
+  --mask-erode MM                 Post-SAM mask erosion (default: 0). Use 0.3-0.5
+                                  only if your photos have a clear shadow halo.
   --sam-model WEIGHTS             SAM2 model file (default: sam2.1_l.pt)
   --skip-trace                    Skip tracing, reuse existing DXFs in generated/
 ```
@@ -137,13 +148,19 @@ optional:
 ```
 generated/
   <stem>/
-    <stem>_rectified.png      Perspective-corrected image (scanner equivalent)
-    <stem>_trace.dxf          Tool outline DXF (inner + tolerance + finger slot)
-    <stem>_trace.svg          SVG preview of the trace
-  combined_layout.dxf         All tools packed into a bin footprint
-  combined_layout_preview.png Layout preview image
-  bin_config.json             Fusion 360 input config
+    <stem>_rectified.png       Perspective-corrected image (scanner equivalent)
+    <stem>_trace.dxf           Tool outline DXF (inner + tolerance + finger slot)
+    <stem>_trace.svg           SVG preview of the trace
+  combined_layout.dxf          All tools packed into a bin footprint
+  layout_preview.png           Screen-viewable layout preview (matplotlib, 150 DPI)
+  layout_actual_size.pdf       1:1 scale fit-test drawing (PDF page = bin footprint)
+  layout_actual_size.svg       1:1 scale fit-test drawing (SVG width/height in mm)
+  bin_config.json              Fusion 360 input config
 ```
+
+The `layout_actual_size.pdf` and `.svg` files are sized to the bin's exact
+mm dimensions — print at "Actual size" / 100% scale (NOT "Fit to page") and
+lay your real tool on top to verify the fit before committing to a 3D print.
 
 After Fusion runs:
 
@@ -152,6 +169,33 @@ generated/
   gridfinity_bin.stl
   gridfinity_bin.step
   gridfinity_bin_preview.png  Viewport screenshot of the finished bin
+```
+
+---
+
+## Web app (browser frontend)
+
+A FastAPI + Lit web wrapper exposes the same pipeline through a browser. Multi-user
+ready: per-job UUID directories, GPU semaphore around SAM2 so concurrent submissions
+queue rather than fight over the GPU, SSE-streamed progress.
+
+```bash
+pip install -e ".[web]"
+pic-to-bin-web --port 8000
+```
+
+Open http://localhost:8000, drag in a photo, fill in the tool height, watch
+the step tracker, review the layout preview (with print-at-actual-size PDF /
+SVG downloads to test fit), then click Proceed to generate the bin config.
+
+The browser back button navigates between screens (form → progress → preview
+→ downloads). The form fields all have an `(i)` info button next to their
+label that opens a modal with a multi-paragraph explanation.
+
+To replace the default `esm.sh` Lit import with a vendored local copy:
+
+```bash
+python -m pic_to_bin.web.vendor_lit
 ```
 
 ---
@@ -264,7 +308,9 @@ Removes both the script and the add-in.
 | `WARNING: Low effective DPI (<100)` | Camera too far away | Hold phone closer; use higher resolution mode |
 | Tools don't fit in grid | Tools too large for `--max-units` | Increase `--max-units` |
 | Fusion freezes building pockets | Stale cached `_bin_builder` after editing | The reload is already wired in — just click the button again. If still stuck, restart Fusion. |
-| Pocket fits too loose / too tight | Tolerance default is now 0 (matches trace) | Adjust `--tolerance` (positive expands the pocket; negative shrinks it) |
+| Pocket fits too loose | Default `--tolerance 0` produces 2 mm physical clearance + 1 mm at each tip | Lower with `--tolerance -0.5` and/or `--axial-tolerance 0.5` |
+| Pocket fits too tight at the tool's tips only | SAM2 under-detected the tapered ends | Increase `--axial-tolerance` (default 1) |
+| Pocket fits too tight everywhere | Trace itself is short (shadow halo, parallax, mask erosion) | First try `--tolerance 1` (= 3 mm physical). If still tight, check `--phone-height` matches your shooting distance |
 
 ### Common photo issues
 
