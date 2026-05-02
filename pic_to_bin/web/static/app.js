@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from "lit";
 const SOFT_DEFAULT_FIELDS = new Set(["phone_height"]);
 
 // Must match TOLERANCE_BASELINE_MM in pipeline.py — used in modal copy only.
-const TOLERANCE_BASELINE_MM = 1.5;
+const TOLERANCE_BASELINE_MM = 2.0;
 
 const FORM_DEFAULTS = {
   paper_size: "legal",
@@ -23,7 +23,7 @@ const FORM_DEFAULTS = {
   straighten_threshold: 45.0,
   max_refine_iterations: 5,
   max_concavity_depth: 3.0,
-  mask_erode: 0.3,
+  mask_erode: 0.0,
 };
 
 // Which fields, when changed on a redo, force a re-trace (expensive).
@@ -163,10 +163,11 @@ const FIELD_INFO = {
   },
   mask_erode: {
     title: "Mask erosion (mm)",
-    hint: "Pixel-shrink the SAM mask to counter shadow halos.",
+    hint: "Pixel-shrink the SAM mask. Default 0; only enable if the trace looks fat.",
     body: [
-      "Phone photos often have a soft shadow halo around the tool that SAM2 picks up as part of the mask, making the trace slightly fatter than reality.",
-      "This setting erodes the mask by N millimeters before vectorization. 0.3 mm handles typical overhead-light shadows. Increase to 0.5–1.0 mm if handles still read wide; set to 0 to disable.",
+      "Phone photos can have a soft shadow halo around the tool that SAM2 picks up as part of the mask, making the trace slightly fatter than reality.",
+      "This setting erodes the mask by N millimeters before vectorization. The default is 0 because a uniform erosion disproportionately shrinks thin or tapered tool tips, which often makes those pockets too tight even when the wider sections fit.",
+      "Increase to 0.3–0.5 mm only if your photo has a visible shadow halo and the trace clearly extends beyond the tool's actual outline.",
     ],
   },
   fit_test: {
@@ -215,6 +216,7 @@ class PicApp extends LitElement {
     this.errorMessage = null;
     this.eventLog = [];
     this.modalField = null;
+    this._artifactKey = 0;
     this._eventSource = null;
   }
 
@@ -321,6 +323,7 @@ class PicApp extends LitElement {
       <pic-preview
         .jobId=${this.jobId}
         .layoutInfo=${this.layoutInfo}
+        .artifactKey=${this._artifactKey}
         @proceed=${this._onProceed}
         @redo=${this._onRedo}
       ></pic-preview>
@@ -331,6 +334,7 @@ class PicApp extends LitElement {
     return html`
       <pic-downloads
         .artifacts=${this.artifacts}
+        .artifactKey=${this._artifactKey}
         @start-over=${this._reset}
       ></pic-downloads>
     `;
@@ -454,12 +458,16 @@ class PicApp extends LitElement {
   async _onLayoutReady() {
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.layoutInfo = summary;
+    // Bump the cache key once when fresh artifacts arrive, so the preview
+    // image reloads on redo but doesn't flicker on every Lit render cycle.
+    this._artifactKey = Date.now();
     this.screen = "preview";
   }
 
   async _onComplete() {
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.artifacts = summary.artifacts || {};
+    this._artifactKey = Date.now();
     this.screen = "downloads";
   }
 
@@ -875,6 +883,7 @@ class PicPreview extends LitElement {
   static properties = {
     jobId: { type: String },
     layoutInfo: { type: Object },
+    artifactKey: { type: Number },
     showRedo: { state: true },
     redoParams: { state: true },
   };
@@ -884,9 +893,11 @@ class PicPreview extends LitElement {
     super();
     this.showRedo = false;
     this.redoParams = {};
+    this.artifactKey = 0;
   }
 
   render() {
+    const k = this.artifactKey;
     const url = this.layoutInfo?.artifacts?.layout_preview;
     const pdfUrl = this.layoutInfo?.artifacts?.fit_test_pdf;
     const svgUrl = this.layoutInfo?.artifacts?.fit_test_svg;
@@ -896,7 +907,7 @@ class PicPreview extends LitElement {
         ${this.layoutInfo ? html`
           <p class="hint">Bin: ${this.layoutInfo.grid_units_x} × ${this.layoutInfo.grid_units_y} gridfinity units</p>
         ` : nothing}
-        ${url ? html`<img class="preview-img" src=${url + "?" + Date.now()}>` : nothing}
+        ${url ? html`<img class="preview-img" src=${`${url}?v=${k}`}>` : nothing}
       </div>
 
       ${pdfUrl || svgUrl ? html`
@@ -917,11 +928,11 @@ class PicPreview extends LitElement {
           </p>
           <div class="downloads">
             ${pdfUrl ? html`
-              <a href=${pdfUrl + "?" + Date.now()} download>
+              <a href=${`${pdfUrl}?v=${k}`} download>
                 Layout — actual size (PDF)
               </a>` : nothing}
             ${svgUrl ? html`
-              <a href=${svgUrl + "?" + Date.now()} download>
+              <a href=${`${svgUrl}?v=${k}`} download>
                 Layout — actual size (SVG)
               </a>` : nothing}
           </div>
@@ -1001,32 +1012,41 @@ customElements.define("pic-preview", PicPreview);
 class PicDownloads extends LitElement {
   static properties = {
     artifacts: { type: Object },
+    artifactKey: { type: Number },
   };
   createRenderRoot() { return this; }
 
+  constructor() {
+    super();
+    this.artifactKey = 0;
+  }
+
   render() {
+    const k = this.artifactKey;
+    const a = this.artifacts;
+    const withKey = (u) => `${u}?v=${k}`;
     return html`
       <div class="card">
         <h2>Downloads</h2>
         <div class="downloads">
-          ${this.artifacts.bin_config ? html`
-            <a href=${this.artifacts.bin_config} download>
+          ${a.bin_config ? html`
+            <a href=${withKey(a.bin_config)} download>
               Bin config (JSON) — for the Fusion 360 add-in
             </a>` : nothing}
-          ${this.artifacts.layout_preview ? html`
-            <a href=${this.artifacts.layout_preview} download>
+          ${a.layout_preview ? html`
+            <a href=${withKey(a.layout_preview)} download>
               Layout preview (PNG) — for screen viewing
             </a>` : nothing}
-          ${this.artifacts.fit_test_pdf ? html`
-            <a href=${this.artifacts.fit_test_pdf} download>
+          ${a.fit_test_pdf ? html`
+            <a href=${withKey(a.fit_test_pdf)} download>
               Layout — actual size (PDF) — print at 100% to test fit
             </a>` : nothing}
-          ${this.artifacts.fit_test_svg ? html`
-            <a href=${this.artifacts.fit_test_svg} download>
+          ${a.fit_test_svg ? html`
+            <a href=${withKey(a.fit_test_svg)} download>
               Layout — actual size (SVG) — print at 100% to test fit
             </a>` : nothing}
-          ${this.artifacts.combined_dxf ? html`
-            <a href=${this.artifacts.combined_dxf} download>
+          ${a.combined_dxf ? html`
+            <a href=${withKey(a.combined_dxf)} download>
               Combined layout (DXF) — for CAD inspection
             </a>` : nothing}
         </div>

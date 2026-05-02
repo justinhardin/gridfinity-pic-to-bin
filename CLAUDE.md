@@ -231,7 +231,8 @@ Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `
 - **Homography safety**: RANSAC rejects outlier corners from wrinkled paper or partially occluded markers. 8 markers give up to 32 point pairs for a 4-DOF homography.
 - **White border fill**: Warped image uses white border (`borderValue=255,255,255`) so areas outside the template appear as white background, which SAM2 handles correctly.
 - **Effective DPI**: Computed from the homography inverse — how many pixels per mm at the template center. Typically 100-250 for phone photos.
-- **Tolerance baseline = 1.5 mm**: The pipeline silently adds 1.5 mm of clearance to whatever the user passes via `--tolerance` (the constant lives in `pipeline.py:TOLERANCE_BASELINE_MM`). The CLI/form default is `0`, which produces a 1.5 mm physical clearance — calibrated for typical FDM tolerances. `--tolerance -1.5` recovers an exact-trace match; more negative produces an interference fit. The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm, so the cut stays light on points regardless of offset value.
+- **Tolerance baseline = 2 mm**: The pipeline silently adds 2 mm of clearance to whatever the user passes via `--tolerance` (constant `pipeline.py:TOLERANCE_BASELINE_MM`). The CLI/form default is `0`, which produces a 2 mm physical clearance — calibrated for typical FDM tolerances. `--tolerance -2` recovers an exact-trace match; more negative produces an interference fit. The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm.
+- **Mask erosion default = 0 mm**: Uniform mask erosion disproportionately shrinks tapered tool tips (a 0.3 mm erosion can lose meaningful coverage at a screwdriver tip while barely affecting a wide handle). Default is 0; users can re-enable when a photo has a clearly fat shadow halo via `--mask-erode 0.3`.
 
 ## Relationship to gridfinity-scan-to-bin
 

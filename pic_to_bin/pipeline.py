@@ -48,12 +48,12 @@ from pic_to_bin.prepare_bin import prepare_bin
 DEFAULT_PHONE_HEIGHT_MM = 482.0
 
 # Baseline tolerance offset (mm) added to whatever the user requests before
-# the trace is offset. Empirically, prints came out too tight at the old
-# "tolerance=1mm" default; the baseline shifts the user's "0" input to a
-# physical 1.5mm clearance, which matches a comfortable clearance fit on
-# typical FDM prints. Setting `--tolerance -1.5` recovers an exact-trace
-# match; more negative values produce an interference fit.
-TOLERANCE_BASELINE_MM = 1.5
+# the trace is offset. Empirically, prints come out too tight without it;
+# 2 mm of baseline clearance produces a comfortable clearance fit on typical
+# FDM prints. The user-facing default is 0 (= 2 mm physical clearance);
+# `--tolerance -2` recovers an exact-trace match, more negative produces an
+# interference fit.
+TOLERANCE_BASELINE_MM = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ def run_pipeline(
     straighten_threshold: float = 45.0,
     max_refine_iterations: int = 5,
     max_concavity_depth: float = 3.0,
-    mask_erode: float = 0.3,
+    mask_erode: float = 0.0,
     sam_model: str = "sam2.1_l.pt",
     skip_trace: bool = False,
     stop_after: StopAfter = "all",
@@ -438,9 +438,12 @@ examples:
         "--max-concavity-depth", type=float, default=3.0,
         help="Maximum acceptable concavity depth loss in mm (default: 3.0)")
     parser.add_argument(
-        "--mask-erode", type=float, default=0.3,
-        help="Post-SAM mask erosion in mm to counter shadow halos (default: 0.3, "
-             "0 to disable). Increase if handles still read wide.")
+        "--mask-erode", type=float, default=0.0,
+        help="Post-SAM mask erosion in mm to counter shadow halos (default: 0). "
+             "Uniform erosion disproportionately shrinks thin/tapered tool "
+             "tips, so leave at 0 unless your photo has a strong shadow halo "
+             "that bleeds into the mask. 0.3-0.5 mm is a reasonable starting "
+             "value when needed.")
     parser.add_argument(
         "--sam-model", type=str, default="sam2.1_l.pt",
         help="SAM2 model weights (default: sam2.1_l.pt)")
