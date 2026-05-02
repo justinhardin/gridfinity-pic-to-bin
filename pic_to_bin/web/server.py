@@ -34,6 +34,8 @@ logger = logging.getLogger("pic_to_bin.web")
 STATIC_DIR = Path(__file__).parent / "static"
 ARTIFACT_WHITELIST = {
     "layout_preview.png": ("image/png", "layout_preview.png"),
+    "layout_actual_size.pdf": ("application/pdf", "layout_actual_size.pdf"),
+    "layout_actual_size.svg": ("image/svg+xml", "layout_actual_size.svg"),
     "combined_layout.dxf": ("application/dxf", "combined_layout.dxf"),
     "bin_config.json": ("application/json", "bin_config.json"),
 }

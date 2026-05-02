@@ -65,6 +65,8 @@ class JobState:
         urls: dict[str, str] = {}
         if self.layout_result:
             urls["layout_preview"] = f"/jobs/{self.id}/artifacts/layout_preview.png"
+            urls["fit_test_pdf"] = f"/jobs/{self.id}/artifacts/layout_actual_size.pdf"
+            urls["fit_test_svg"] = f"/jobs/{self.id}/artifacts/layout_actual_size.svg"
             urls["combined_dxf"] = f"/jobs/{self.id}/artifacts/combined_layout.dxf"
         if self.final_result and self.final_result.get("bin_config"):
             urls["bin_config"] = f"/jobs/{self.id}/artifacts/bin_config.json"

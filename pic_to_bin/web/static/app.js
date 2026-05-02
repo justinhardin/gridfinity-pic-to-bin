@@ -35,6 +35,150 @@ const TRACE_REQUIRED_FIELDS = new Set([
   "mask_erode",
 ]);
 
+// Detailed per-field documentation. The key matches the form-field name; the
+// title is shown in the modal heading and the body is rendered as paragraphs
+// (split on \n\n). A short 1-line `hint` is shown inline under the input.
+const FIELD_INFO = {
+  tool_height: {
+    title: "Tool height (mm)",
+    hint: "Required. Measure with calipers — depth of the tool when it lies flat.",
+    body: [
+      "The thickest dimension of the tool when laid flat on the template — what you'd measure with calipers across its depth.",
+      "The bin auto-sizes so the upper half of the tool stands above the deck (for finger access) and the lower half is buried in the pocket. The pocket floor sits 1 mm above the bin floor.",
+      "If you're tracing several photos in one job, give each one its own height — the form lets you set them independently.",
+    ],
+  },
+  paper_size: {
+    title: "Paper size",
+    hint: "Match the size you printed the ArUco template on.",
+    body: [
+      "The marker template is provided in three sizes: A4 (210×297 mm), US Letter (215.9×279.4 mm), and US Legal (215.9×355.6 mm).",
+      "Pick the size you actually printed — the homography uses the marker positions for that size to compute the millimeter scale.",
+    ],
+  },
+  phone_height: {
+    title: "Phone height (mm)",
+    hint: "Camera height above the paper. Compensates parallax.",
+    body: [
+      "How far the phone camera was from the paper when you took the photo.",
+      "A tool that sits above the paper appears slightly larger in the photo than it really is. The pipeline compensates by scaling the trace down by phone_height / (phone_height − tool_height/2).",
+      "482 mm is a reasonable default for hand-held overhead shots. Lower values apply more aggressive compensation; set to 0 to disable parallax correction entirely.",
+    ],
+  },
+  tolerance: {
+    title: "Tolerance (mm)",
+    hint: "+ for clearance fit, − for interference fit, 0 = exact trace.",
+    body: [
+      "How far the pocket outline is offset from the actual tool trace.",
+      "Positive (default 1 mm) — clearance fit. Easy to drop the tool in and pluck it out. Use larger values for soft tools or sloppy traces.",
+      "Zero — pocket matches the trace exactly. Tight fit; may require a little sanding.",
+      "Negative — interference fit. The tool wedges in. Useful for things you don't want rattling out (e.g. drill bits).",
+      "The tolerance polygon is always Douglas-Peucker simplified at 0.3 mm regardless of value, so Fusion gets a clean low-point-count cut.",
+    ],
+  },
+  gap: {
+    title: "Gap between tools (mm)",
+    hint: "Minimum space between adjacent pockets in the layout.",
+    body: [
+      "When packing multiple tools into one bin, leave at least this much wall between any two pockets.",
+      "Smaller values pack more tools into a smaller bin but make individual tools harder to grab. Larger values give roomier separation but grow the bin.",
+    ],
+  },
+  bin_margin: {
+    title: "Bin margin (mm)",
+    hint: "Extra clearance from tool extents to the bin wall.",
+    body: [
+      "Extra padding between the outermost tool extent and the bin boundary, applied before snapping to a whole gridfinity unit.",
+      "Usually you don't need this — the natural slack from rounding the bin size up to a whole 42 mm unit, plus the tolerance, is enough.",
+      "Set this >0 to force the bin one unit larger when a tool would otherwise sit right against the wall.",
+    ],
+  },
+  min_units: {
+    title: "Minimum grid units",
+    hint: "Smallest bin footprint per axis (gridfinity units, 42 mm each).",
+    body: [
+      "Force the bin to be at least this many units wide and tall, even if the tool would fit in something smaller.",
+      "Useful when you want the bin to match an existing drawer slot or to look uniform alongside other bins in a set.",
+    ],
+  },
+  max_units: {
+    title: "Maximum grid units",
+    hint: "Largest bin footprint allowed before the pipeline gives up.",
+    body: [
+      "Cap on how big the bin can grow per axis. If the tools don't fit in this size the pipeline raises an error rather than silently producing a giant bin.",
+      "Default 7×7 is plenty for most hand tools.",
+    ],
+  },
+  height_units: {
+    title: "Bin height (units, blank = auto)",
+    hint: "Force a specific bin height, or leave blank to auto-size.",
+    body: [
+      "Each gridfinity height unit is 7 mm.",
+      "When blank (default), the pipeline picks the smallest height that fits the tallest tool plus 1 mm of floor below the pocket.",
+      "Set explicitly if you need to match an existing stack or want a deeper pocket than the tool requires.",
+    ],
+  },
+  stacking: {
+    title: "Stacking lip",
+    hint: "Toggle the lip that lets bins stack on each other.",
+    body: [
+      "When on, the bin gets the standard gridfinity stacking lip on its top edge so other bins can stack on it.",
+      "Turn off for shallow drawers where the lip would push the bin too tall.",
+    ],
+  },
+  slots: {
+    title: "Finger-access slots",
+    hint: "Toggle the cutout that lets you slide a finger under the tool.",
+    body: [
+      "Adds a slot in the pocket centered along the tool's principal axis so you can slide a finger underneath and lift it out.",
+      "Turn off for very small tools where the slot would intrude awkwardly, or for tools you'd rather pinch from the top.",
+    ],
+  },
+  straighten_threshold: {
+    title: "Straighten threshold (degrees)",
+    hint: "Auto-rotate the trace if it's within this many degrees of axis-aligned.",
+    body: [
+      "After tracing, if the tool's principal axis is within this many degrees of horizontal or vertical, the pipeline rotates the trace to align with the bin axes.",
+      "Set to 0 to disable auto-straightening (use the exact rotation captured in the photo).",
+    ],
+  },
+  max_refine_iterations: {
+    title: "Max refine iterations",
+    hint: "How many cleanup passes the trace is allowed to take.",
+    body: [
+      "After SAM2 produces an initial mask, the pipeline iteratively cleans it up — closing notches, smoothing contours — and re-checks the result.",
+      "More iterations let it produce smoother outlines for noisy photos but take longer. Default 5 is a good balance.",
+    ],
+  },
+  max_concavity_depth: {
+    title: "Max concavity depth (mm)",
+    hint: "How aggressively cleanup is allowed to fill in concavities.",
+    body: [
+      "Cleanup may fill shallow concavities to smooth the outline. This is the deepest concavity (in mm) the cleanup is allowed to lose before stopping.",
+      "Increase if your tool has deliberate notches that are getting filled in. Decrease for cleaner outlines on simple shapes.",
+    ],
+  },
+  mask_erode: {
+    title: "Mask erosion (mm)",
+    hint: "Pixel-shrink the SAM mask to counter shadow halos.",
+    body: [
+      "Phone photos often have a soft shadow halo around the tool that SAM2 picks up as part of the mask, making the trace slightly fatter than reality.",
+      "This setting erodes the mask by N millimeters before vectorization. 0.3 mm handles typical overhead-light shadows. Increase to 0.5–1.0 mm if handles still read wide; set to 0 to disable.",
+    ],
+  },
+  fit_test: {
+    title: "Print at actual size to test fit",
+    hint: "Print, lay the tool on top, and verify before 3D printing.",
+    body: [
+      "Before you commit to a multi-hour 3D print, print the layout on a normal printer and lay your real tool on top of the outlines to verify the fit.",
+      "Use the PDF or SVG download — both encode the bin's exact mm dimensions, so they print at 1:1 scale on any printer regardless of its DPI. The PNG version is for screen viewing only and will print at the wrong size.",
+      "When you print, choose \"Actual size\" or \"100% scale\" (NOT \"Fit to page\"). The page will be exactly the bin footprint, so on a Letter/A4 sheet you'll see the bin shape with whitespace around it.",
+      "If your tool is bigger than 8.5×11\", the PDF page may be larger than your paper — most printers will then offer a \"poster / tile across multiple pages\" mode. The SVG opens in any browser and you can print from there as well.",
+      "What to check: the dashed outline is the actual pocket shape. Your tool should fit inside it with the tolerance you set (1 mm clearance by default).",
+    ],
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Root: state machine across screens
 // ---------------------------------------------------------------------------
@@ -50,6 +194,7 @@ class PicApp extends LitElement {
     artifacts: { state: true },
     errorMessage: { state: true },
     eventLog: { state: true },
+    modalField: { state: true },
   };
 
   // Don't isolate inside shadow DOM — we want the global stylesheet to apply.
@@ -66,16 +211,60 @@ class PicApp extends LitElement {
     this.artifacts = {};
     this.errorMessage = null;
     this.eventLog = [];
+    this.modalField = null;
     this._eventSource = null;
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    // Children dispatch CustomEvent("show-info", {detail: {field}, bubbles: true})
+    // and we render the modal here so it works on every screen.
+    this._showInfoHandler = (e) => { this.modalField = e.detail.field; };
+    this.addEventListener("show-info", this._showInfoHandler);
+    this._escHandler = (e) => {
+      if (e.key === "Escape" && this.modalField) this.modalField = null;
+    };
+    window.addEventListener("keydown", this._escHandler);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.removeEventListener("show-info", this._showInfoHandler);
+    window.removeEventListener("keydown", this._escHandler);
+  }
+
   render() {
-    if (this.screen === "form")      return this._renderForm();
-    if (this.screen === "progress")  return this._renderProgress();
-    if (this.screen === "preview")   return this._renderPreview();
-    if (this.screen === "downloads") return this._renderDownloads();
-    if (this.screen === "error")     return this._renderError();
-    return nothing;
+    let screen;
+    if (this.screen === "form")           screen = this._renderForm();
+    else if (this.screen === "progress")  screen = this._renderProgress();
+    else if (this.screen === "preview")   screen = this._renderPreview();
+    else if (this.screen === "downloads") screen = this._renderDownloads();
+    else if (this.screen === "error")     screen = this._renderError();
+    else screen = nothing;
+    return html`${screen}${this._renderModal()}`;
+  }
+
+  _renderModal() {
+    if (!this.modalField) return nothing;
+    const info = FIELD_INFO[this.modalField];
+    if (!info) return nothing;
+    const close = () => this.modalField = null;
+    return html`
+      <div class="modal-backdrop" @click=${close}>
+        <div class="modal" @click=${(e) => e.stopPropagation()} role="dialog">
+          <div class="modal-header">
+            <h3>${info.title}</h3>
+            <button class="modal-close" type="button" @click=${close} aria-label="Close">×</button>
+          </div>
+          <div class="modal-body">
+            ${info.body.map(p => html`<p>${p}</p>`)}
+          </div>
+          <div class="modal-footer">
+            <button class="primary" type="button" @click=${close}>Got it</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   // ---- Screens ------------------------------------------------------------
@@ -296,6 +485,13 @@ customElements.define("pic-app", PicApp);
 // pic-form — the input form
 // ---------------------------------------------------------------------------
 
+// Helper: dispatch a show-info event that bubbles to <pic-app>.
+function showInfo(el, field) {
+  el.dispatchEvent(new CustomEvent("show-info", {
+    detail: { field }, bubbles: true, composed: true,
+  }));
+}
+
 class PicForm extends LitElement {
   static properties = {
     files: { type: Array },
@@ -315,7 +511,10 @@ class PicForm extends LitElement {
       this.files.every(f => f.toolHeight != null && f.toolHeight !== "" && !isNaN(f.toolHeight));
     return html`
       <div class="card">
-        <h2>Photos</h2>
+        <div class="card-header">
+          <h2>1. Photos</h2>
+          ${this._renderInfoLink("tool_height", "About tool height")}
+        </div>
         <div class="dropzone ${this.dragOver ? "over" : ""}"
              @click=${() => this.querySelector("input[type=file]").click()}
              @dragover=${this._onDragOver}
@@ -330,47 +529,61 @@ class PicForm extends LitElement {
       </div>
 
       <div class="card">
-        <h2>Parameters</h2>
-        ${this._renderField("phone_height", "Phone height (mm)", "number", {
-          hint: "Camera height above paper. Compensates parallax.",
-        })}
-        ${this._renderField("paper_size", "Paper size", "select", {
-          options: ["a4", "letter", "legal"],
-        })}
+        <h2>2. Setup</h2>
         <div class="field-row">
-          ${this._renderField("tolerance", "Tolerance (mm)", "number", {
-            step: 0.1, hint: "Pocket clearance. + looser, − tighter."
+          ${this._renderField("paper_size", "select", {
+            options: ["a4", "letter", "legal"],
           })}
-          ${this._renderField("gap", "Gap (mm)", "number", { step: 0.1 })}
-          ${this._renderField("bin_margin", "Bin margin (mm)", "number", { step: 0.1 })}
+          ${this._renderField("phone_height", "number", { step: 1 })}
         </div>
+      </div>
+
+      <div class="card">
+        <h2>3. Tool fitting</h2>
         <div class="field-row">
-          ${this._renderField("min_units", "Min grid units", "number", { step: 1 })}
-          ${this._renderField("max_units", "Max grid units", "number", { step: 1 })}
-          ${this._renderField("height_units", "Height units (auto if blank)", "number", { step: 1 })}
+          ${this._renderField("tolerance", "number", { step: 0.1 })}
+          ${this._renderField("gap", "number", { step: 0.1 })}
+          ${this._renderField("bin_margin", "number", { step: 0.1 })}
         </div>
+      </div>
+
+      <div class="card">
+        <h2>4. Bin sizing</h2>
         <div class="field-row">
-          ${this._renderField("stacking", "Stacking lip", "checkbox")}
-          ${this._renderField("slots", "Finger slots", "checkbox")}
+          ${this._renderField("min_units", "number", { step: 1 })}
+          ${this._renderField("max_units", "number", { step: 1 })}
+          ${this._renderField("height_units", "number", { step: 1, placeholder: "auto" })}
+        </div>
+        <div class="field-row toggles">
+          ${this._renderField("stacking", "checkbox")}
+          ${this._renderField("slots", "checkbox")}
         </div>
 
         <details>
           <summary>Advanced (tracing tuning)</summary>
+          <p class="hint section-hint">
+            These tune the SAM2 cleanup and vectorization. Defaults are good
+            for most photos — only change if your traces look noisy or wrong.
+          </p>
           <div class="field-row">
-            ${this._renderField("straighten_threshold", "Straighten threshold (°)", "number", { step: 1 })}
-            ${this._renderField("max_refine_iterations", "Max refine iterations", "number", { step: 1 })}
-            ${this._renderField("max_concavity_depth", "Max concavity depth (mm)", "number", { step: 0.1 })}
-            ${this._renderField("mask_erode", "Mask erode (mm)", "number", { step: 0.05 })}
+            ${this._renderField("straighten_threshold", "number", { step: 1 })}
+            ${this._renderField("max_refine_iterations", "number", { step: 1 })}
+            ${this._renderField("max_concavity_depth", "number", { step: 0.1 })}
+            ${this._renderField("mask_erode", "number", { step: 0.05 })}
           </div>
         </details>
       </div>
 
-      <div class="card">
+      <div class="card submit-card">
         <button class="primary" ?disabled=${!allHeightsSet}
                 @click=${() => this.dispatchEvent(new CustomEvent("submit-job"))}>
           Generate bin
         </button>
+        ${!allHeightsSet ? html`
+          <p class="hint">Drop at least one photo and fill in tool height to enable.</p>
+        ` : nothing}
       </div>
+
     `;
   }
 
@@ -382,57 +595,90 @@ class PicForm extends LitElement {
           <div class="thumb">
             <img src=${f.dataUrl} alt=${f.file.name}>
             <div class="name" title=${f.file.name}>${f.file.name}</div>
-            <label>
-              Tool height (mm) *
+            <label class="thumb-field">
+              <span class="thumb-label">
+                Tool height (mm) *
+                <button class="info-btn" type="button"
+                        @click=${(e) => { e.stopPropagation(); showInfo(this, "tool_height"); }}
+                        aria-label="About tool height">i</button>
+              </span>
               <input type="number" step="0.1" .value=${f.toolHeight ?? ""}
                      @input=${(e) => this._setHeight(i, e.target.value)}>
             </label>
-            <button class="remove" @click=${() => this._remove(i)}>Remove</button>
+            <button class="remove" type="button" @click=${() => this._remove(i)}>Remove</button>
           </div>
         `)}
       </div>
     `;
   }
 
-  _renderField(name, label, kind, opts = {}) {
+  _renderField(name, kind, opts = {}) {
+    const info = FIELD_INFO[name] || {};
+    const label = info.title || name;
+    const hint = info.hint;
     const value = this.formValues[name];
     const isDefault = SOFT_DEFAULT_FIELDS.has(name) && !this.touched.has(name);
     const cls = ["field", isDefault ? "default-applied" : ""].join(" ");
 
+    const labelEl = html`
+      <span class="field-label">
+        ${label}
+        ${info.body ? html`
+          <button class="info-btn" type="button"
+                  @click=${() => showInfo(this, name)}
+                  aria-label="Explain ${label}">i</button>
+        ` : nothing}
+      </span>
+    `;
+
     if (kind === "checkbox") {
       return html`
         <div class=${cls}>
-          <label>
+          <label class="checkbox-label">
             <input type="checkbox" .checked=${!!value}
                    @change=${(e) => this._emit(name, e.target.checked)}>
-            ${label}
+            ${labelEl}
           </label>
+          ${hint ? html`<span class="hint">${hint}</span>` : nothing}
         </div>
       `;
     }
     if (kind === "select") {
       return html`
         <div class=${cls}>
-          <label>${label}</label>
+          <label>${labelEl}</label>
           <select @change=${(e) => this._emit(name, e.target.value)}>
             ${opts.options.map(o => html`
               <option value=${o} ?selected=${o === value}>${o}</option>
             `)}
           </select>
+          ${hint ? html`<span class="hint">${hint}</span>` : nothing}
         </div>
       `;
     }
     return html`
       <div class=${cls}>
-        <label>${label}</label>
+        <label>${labelEl}</label>
         <input type=${kind} .value=${value === "" ? "" : String(value)}
                step=${opts.step ?? "any"}
+               placeholder=${opts.placeholder ?? ""}
                @input=${(e) => this._emit(name, e.target.value === "" ? "" : Number(e.target.value))}>
-        ${isDefault ? html`<span class="hint">Default applied — confirm or change.</span>` : nothing}
-        ${opts.hint ? html`<span class="hint">${opts.hint}</span>` : nothing}
+        ${isDefault ? html`<span class="hint default-hint">Default applied — confirm or change.</span>` : nothing}
+        ${hint ? html`<span class="hint">${hint}</span>` : nothing}
       </div>
     `;
   }
+
+  _renderInfoLink(fieldName, label) {
+    if (!FIELD_INFO[fieldName]) return nothing;
+    return html`
+      <button class="info-link" type="button"
+              @click=${() => showInfo(this, fieldName)}>
+        <span class="info-btn">i</span> ${label}
+      </button>
+    `;
+  }
+
 
   _emit(name, value) {
     this.dispatchEvent(new CustomEvent("field-changed", {
@@ -616,6 +862,8 @@ class PicPreview extends LitElement {
 
   render() {
     const url = this.layoutInfo?.artifacts?.layout_preview;
+    const pdfUrl = this.layoutInfo?.artifacts?.fit_test_pdf;
+    const svgUrl = this.layoutInfo?.artifacts?.fit_test_svg;
     return html`
       <div class="card">
         <h2>Layout preview</h2>
@@ -623,6 +871,39 @@ class PicPreview extends LitElement {
           <p class="hint">Bin: ${this.layoutInfo.grid_units_x} × ${this.layoutInfo.grid_units_y} gridfinity units</p>
         ` : nothing}
         ${url ? html`<img class="preview-img" src=${url + "?" + Date.now()}>` : nothing}
+      </div>
+
+      ${pdfUrl || svgUrl ? html`
+        <div class="card fit-test-card">
+          <div class="card-header">
+            <h2>Test the fit before printing</h2>
+            <button class="info-link" type="button"
+                    @click=${() => showInfo(this, "fit_test")}>
+              <span class="info-btn">i</span> What is this?
+            </button>
+          </div>
+          <p class="hint">
+            Print this layout at <strong>actual size / 100% scale</strong>
+            (not "fit to page") and lay your real tool on top to verify
+            it fits before you commit to a multi-hour 3D print. Both files
+            encode the bin's exact mm dimensions so they print at 1:1 on
+            any printer.
+          </p>
+          <div class="downloads">
+            ${pdfUrl ? html`
+              <a href=${pdfUrl + "?" + Date.now()} download>
+                Layout — actual size (PDF)
+              </a>` : nothing}
+            ${svgUrl ? html`
+              <a href=${svgUrl + "?" + Date.now()} download>
+                Layout — actual size (SVG)
+              </a>` : nothing}
+          </div>
+        </div>
+      ` : nothing}
+
+      <div class="card">
+        <h2>Looks good?</h2>
         <div class="actions">
           <button class="primary" @click=${() => this.dispatchEvent(new CustomEvent("proceed"))}>
             Proceed → generate bin config
@@ -702,16 +983,34 @@ class PicDownloads extends LitElement {
       <div class="card">
         <h2>Downloads</h2>
         <div class="downloads">
-          ${this.artifacts.layout_preview ? html`
-            <a href=${this.artifacts.layout_preview} download>Layout preview (PNG)</a>` : nothing}
-          ${this.artifacts.combined_dxf ? html`
-            <a href=${this.artifacts.combined_dxf} download>Combined layout (DXF)</a>` : nothing}
           ${this.artifacts.bin_config ? html`
-            <a href=${this.artifacts.bin_config} download>Bin config (JSON for Fusion 360)</a>` : nothing}
+            <a href=${this.artifacts.bin_config} download>
+              Bin config (JSON) — for the Fusion 360 add-in
+            </a>` : nothing}
+          ${this.artifacts.layout_preview ? html`
+            <a href=${this.artifacts.layout_preview} download>
+              Layout preview (PNG) — for screen viewing
+            </a>` : nothing}
+          ${this.artifacts.fit_test_pdf ? html`
+            <a href=${this.artifacts.fit_test_pdf} download>
+              Layout — actual size (PDF) — print at 100% to test fit
+            </a>` : nothing}
+          ${this.artifacts.fit_test_svg ? html`
+            <a href=${this.artifacts.fit_test_svg} download>
+              Layout — actual size (SVG) — print at 100% to test fit
+            </a>` : nothing}
+          ${this.artifacts.combined_dxf ? html`
+            <a href=${this.artifacts.combined_dxf} download>
+              Combined layout (DXF) — for CAD inspection
+            </a>` : nothing}
         </div>
         <p class="hint" style="margin-top:1rem">
           Next: open Fusion 360 → Solid → Create → Gridfinity Pic-to-Bin →
           load the bin_config.json.
+          <button class="info-link" type="button" style="margin-left:0.5rem"
+                  @click=${() => showInfo(this, "fit_test")}>
+            <span class="info-btn">i</span> About fit testing
+          </button>
         </p>
         <div class="actions" style="margin-top:1rem">
           <button class="secondary" @click=${() => this.dispatchEvent(new CustomEvent("start-over"))}>
