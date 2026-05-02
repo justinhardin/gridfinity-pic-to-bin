@@ -93,6 +93,7 @@ def run_pipeline(
     output_dir,
     paper_size: str = "legal",
     tolerance: float = 0.0,
+    axial_tolerance: float = 1.0,
     phone_height: float = DEFAULT_PHONE_HEIGHT_MM,
     gap: float = 3.0,
     bin_margin: float = 0.0,
@@ -197,6 +198,7 @@ def run_pipeline(
                     image_path=str(rectified_img),
                     dpi=dpi,
                     tolerance_mm=tolerance + TOLERANCE_BASELINE_MM,
+                    axial_tolerance_mm=axial_tolerance,
                     straighten_threshold=straighten_threshold,
                     output_dir=str(tool_output_dir),
                     max_iterations=max_refine_iterations,
@@ -385,6 +387,13 @@ examples:
              f"= looser fit, negative = tighter, "
              f"--tolerance -{TOLERANCE_BASELINE_MM} = exact trace match.")
     parser.add_argument(
+        "--axial-tolerance", type=float, default=1.0,
+        help="Extra clearance (mm) along the tool's principal axis only "
+             "(default: 1.0). Each end of the tool gets pushed outward by "
+             "this amount, leaving the perpendicular extent unchanged. "
+             "Compensates for SAM2 mask under-detection at tapered tool "
+             "tips. Set to 0 for fully uniform tolerance.")
+    parser.add_argument(
         "--phone-height", type=float, default=None,
         help="Phone camera height above the template in mm (default: 482). "
              "Used to compensate parallax: a tool sitting above the paper "
@@ -484,6 +493,7 @@ examples:
         output_dir=output_dir,
         paper_size=args.paper_size,
         tolerance=args.tolerance,
+        axial_tolerance=args.axial_tolerance,
         phone_height=args.phone_height,
         gap=args.gap,
         bin_margin=args.bin_margin,

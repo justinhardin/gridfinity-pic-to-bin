@@ -12,6 +12,7 @@ const TOLERANCE_BASELINE_MM = 2.0;
 const FORM_DEFAULTS = {
   paper_size: "legal",
   tolerance: 0.0,
+  axial_tolerance: 1.0,
   phone_height: 482.0,
   gap: 3.0,
   bin_margin: 0.0,
@@ -31,6 +32,7 @@ const FORM_DEFAULTS = {
 const TRACE_REQUIRED_FIELDS = new Set([
   "phone_height",
   "tolerance",
+  "axial_tolerance",
   "slots",
   "straighten_threshold",
   "max_refine_iterations",
@@ -72,11 +74,21 @@ const FIELD_INFO = {
     title: "Tolerance (mm)",
     hint: "Extra clearance on top of the standard fit. Default 0 is recommended.",
     body: [
-      `Extra clearance applied to the pocket on top of a built-in ${TOLERANCE_BASELINE_MM} mm baseline. The baseline is calibrated for typical FDM 3D printer tolerances — at the default 0, your tool should slide into the printed pocket comfortably.`,
+      `Extra clearance applied uniformly to the pocket on top of a built-in ${TOLERANCE_BASELINE_MM} mm baseline. The baseline is calibrated for typical FDM 3D printer tolerances — at the default 0, your tool should slide into the printed pocket comfortably.`,
       "Positive — looser fit. Use for soft or rubber-handled tools, or if your printer over-extrudes.",
       "Negative — tighter fit. The first −0.3 to −0.5 mm gives a snug, hand-fit feel. Going more negative produces an interference fit (the tool wedges in).",
       `−${TOLERANCE_BASELINE_MM} — pocket matches the trace exactly (no clearance at all). Below this value the pocket is smaller than the trace.`,
       "The tolerance polygon is always Douglas-Peucker simplified at 0.3 mm regardless of value, so Fusion gets a clean low-point-count cut.",
+    ],
+  },
+  axial_tolerance: {
+    title: "Axial tolerance (mm)",
+    hint: "Extra clearance only at the tool's tips, not its sides.",
+    body: [
+      "Extra clearance pushed onto each end of the tool along its long (principal) axis only. The perpendicular extent is unchanged.",
+      "The SAM2 segmentation tends to under-detect tapered or thin tool tips, so the trace is shorter than the actual tool. Adding uniform tolerance to fix this would make the wider sections too loose. This setting fixes only the ends.",
+      "Default 1 mm pushes each end outward by 1 mm (so the pocket is 2 mm longer overall along the axis). Increase if tool tips still don't fit; set to 0 for fully uniform tolerance.",
+      "Caveat: this is a linear stretch in the rotated frame, so any features along the axis stretch slightly too. Fine for typical hand tools, less ideal for tools with internal axis-parallel features (rare).",
     ],
   },
   gap: {
@@ -576,6 +588,9 @@ class PicForm extends LitElement {
         <h2>3. Tool fitting</h2>
         <div class="field-row">
           ${this._renderField("tolerance", "number", { step: 0.1 })}
+          ${this._renderField("axial_tolerance", "number", { step: 0.1 })}
+        </div>
+        <div class="field-row">
           ${this._renderField("gap", "number", { step: 0.1 })}
           ${this._renderField("bin_margin", "number", { step: 0.1 })}
         </div>
@@ -967,6 +982,7 @@ class PicPreview extends LitElement {
         </p>
         <div class="field-row">
           ${this._redoNum("tolerance", "Tolerance (mm)", 0.1)}
+          ${this._redoNum("axial_tolerance", "Axial tolerance (mm)", 0.1)}
           ${this._redoNum("gap", "Gap (mm)", 0.1)}
           ${this._redoNum("bin_margin", "Bin margin (mm)", 0.1)}
           ${this._redoNum("min_units", "Min units", 1)}

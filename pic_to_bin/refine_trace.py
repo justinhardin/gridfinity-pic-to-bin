@@ -270,6 +270,7 @@ def refine_trace(
     dpi: int = 200,
     clearance_mm: float = 0.0,
     tolerance_mm: float = 0.0,
+    axial_tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -383,6 +384,7 @@ def refine_trace(
     result = trace_from_mask(
         raw_mask, stem, dpi=dpi,
         clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
+        axial_tolerance_mm=axial_tolerance_mm,
         alphamax=alphamax, turdsize=turdsize, opttolerance=opttolerance,
         straighten_threshold=straighten_threshold,
         output_dir=str(output_dir),

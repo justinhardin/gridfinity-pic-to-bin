@@ -743,6 +743,7 @@ def trace_from_mask(
     dpi: int = 200,
     clearance_mm: float = 0.0,
     tolerance_mm: float = 0.0,
+    axial_tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -860,6 +861,7 @@ def trace_from_mask(
     dxf_path = output_dir / f"{stem}_trace.dxf"
     potrace_to_dxf(path, str(dxf_path), scale=scale,
                    clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
+                   axial_tolerance_mm=axial_tolerance_mm,
                    img_shape=mask.shape, slot_polygon=slot_polygon)
     print(f"  Saved DXF: {dxf_path}")
 

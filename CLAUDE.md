@@ -233,6 +233,7 @@ Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `
 - **Effective DPI**: Computed from the homography inverse — how many pixels per mm at the template center. Typically 100-250 for phone photos.
 - **Tolerance baseline = 2 mm**: The pipeline silently adds 2 mm of clearance to whatever the user passes via `--tolerance` (constant `pipeline.py:TOLERANCE_BASELINE_MM`). The CLI/form default is `0`, which produces a 2 mm physical clearance — calibrated for typical FDM tolerances. `--tolerance -2` recovers an exact-trace match; more negative produces an interference fit. The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm.
 - **Mask erosion default = 0 mm**: Uniform mask erosion disproportionately shrinks tapered tool tips (a 0.3 mm erosion can lose meaningful coverage at a screwdriver tip while barely affecting a wide handle). Default is 0; users can re-enable when a photo has a clearly fat shadow halo via `--mask-erode 0.3`.
+- **Axial tolerance (default 1 mm)**: After the uniform offset, the tolerance polygon is stretched along the tool's PCA principal axis so each end gets `--axial-tolerance` mm of additional clearance (perpendicular extent unchanged). Compensates for SAM2's tendency to under-detect tapered tool tips. Implemented in `trace_export._axial_stretch_polygons` via SVD on the polygon point cloud + a linear-ramp scale in the rotated frame. Set to 0 for fully uniform tolerance.
 
 ## Relationship to gridfinity-scan-to-bin
 
