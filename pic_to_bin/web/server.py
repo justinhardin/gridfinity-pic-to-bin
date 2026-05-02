@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from pic_to_bin.web.jobs import JobManager, JobStatus
+from pic_to_bin.web.jobs import JobManager, JobStatus, download_filename
 
 logger = logging.getLogger("pic_to_bin.web")
 
@@ -187,7 +187,11 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
         path = job.output_dir / filename
         if not path.exists():
             raise HTTPException(404, f"{filename} not yet produced")
-        return FileResponse(path, media_type=media_type, filename=filename)
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=download_filename(job.part_name, filename),
+        )
 
     @app.exception_handler(Exception)
     async def unhandled(_request: Request, exc: Exception):

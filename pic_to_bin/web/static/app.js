@@ -1,4 +1,4 @@
-import { LitElement, html, css, nothing } from "lit";
+import { LitElement, html, svg, css, nothing } from "lit";
 
 // Pipeline parameter metadata. Mirrors pipeline.run_pipeline kwargs.
 // "Hard required" = fields the user must touch (no default).
@@ -10,6 +10,7 @@ const SOFT_DEFAULT_FIELDS = new Set(["phone_height"]);
 const TOLERANCE_BASELINE_MM = 2.0;
 
 const FORM_DEFAULTS = {
+  part_name: "",
   paper_size: "legal",
   tolerance: 0.0,
   axial_tolerance: 1.0,
@@ -46,6 +47,14 @@ const TRACE_REQUIRED_FIELDS = new Set([
 // title is shown in the modal heading and the body is rendered as paragraphs
 // (split on \n\n). A short 1-line `hint` is shown inline under the input.
 const FIELD_INFO = {
+  part_name: {
+    title: "Part name (optional)",
+    hint: "If set, downloaded files will use this name (e.g. zircon_layout.pdf).",
+    body: [
+      "Optional label for this job. When set, the files you download are renamed with this prefix — for example, layout_actual_size.pdf becomes <part_name>_layout.pdf, layout_preview.png becomes <part_name>_preview.png, and so on.",
+      "Special characters are stripped automatically: only letters, numbers, underscores, and hyphens are kept; spaces become underscores. Leave it blank to keep the default filenames.",
+    ],
+  },
   tool_height: {
     title: "Tool height (mm)",
     hint: "Required. Measure with calipers — depth of the tool when it lies flat.",
@@ -588,7 +597,19 @@ class PicForm extends LitElement {
     return html`
       <div class="card">
         <div class="card-header">
-          <h2>1. Photos</h2>
+          <h2>1. Part name <span class="card-h2-sub">(optional)</span></h2>
+          ${this._renderInfoLink("part_name", "What is this?")}
+        </div>
+        <input type="text" class="part-name-input"
+               placeholder="e.g. zircon_stud_finder"
+               .value=${this.formValues.part_name ?? ""}
+               @input=${(e) => this._emit("part_name", e.target.value)}>
+        <p class="hint">Used as a prefix for downloaded filenames. Leave blank to keep defaults.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>2. Photos</h2>
           ${this._renderInfoLink("tool_height", "About tool height")}
         </div>
         <div class="dropzone ${this.dragOver ? "over" : ""}"
@@ -605,7 +626,7 @@ class PicForm extends LitElement {
       </div>
 
       <div class="card">
-        <h2>2. Setup</h2>
+        <h2>3. Setup</h2>
         <div class="field-row">
           ${this._renderField("paper_size", "select", {
             options: ["a4", "letter", "legal"],
@@ -616,7 +637,7 @@ class PicForm extends LitElement {
       </div>
 
       <div class="card">
-        <h2>3. Tool fitting</h2>
+        <h2>4. Tool fitting</h2>
         <div class="field-row">
           ${this._renderField("tolerance", "number", { step: 0.1 })}
           ${this._renderField("axial_tolerance", "number", { step: 0.1 })}
@@ -628,7 +649,7 @@ class PicForm extends LitElement {
       </div>
 
       <div class="card">
-        <h2>4. Bin sizing</h2>
+        <h2>5. Bin sizing</h2>
         <div class="field-row">
           ${this._renderField("min_units", "number", { step: 1 })}
           ${this._renderField("max_units", "number", { step: 1 })}
@@ -695,28 +716,42 @@ class PicForm extends LitElement {
   _renderTaperField() {
     const info = FIELD_INFO.tool_taper;
     const value = this.formValues.tool_taper;
-    // Each option: a side-profile silhouette sitting on a "ground line"
-    // (the paper). Polygon points are tweaked to match the description.
+    // Side-profile silhouettes on a ground line. Trapezoid points use
+    // viewBox 0 0 64 56 — bottom edge at y=44, top at y=8, sides flared
+    // so the difference between top/bottom widths is visually obvious.
+    const ground = svg`<line x1="2" y1="48" x2="62" y2="48"
+                             stroke="currentColor" stroke-width="1.5"
+                             opacity="0.35"/>`;
+    const shapeAttrs = `fill="currentColor" fill-opacity="0.18"
+                        stroke="currentColor" stroke-width="2"
+                        stroke-linejoin="round"`;
     const options = [
       {
         value: "top",
         label: "Widest at top",
-        sub: "Screwdrivers, pliers, hammers",
-        // Trapezoid wider at top, narrower at bottom.
-        points: "16,32 24,32 32,12 8,12",
+        // Bottom 22→42 (20 wide), top 4→60 (56 wide) — flares outward.
+        shape: svg`<polygon points="22,44 42,44 60,8 4,8"
+                            fill="currentColor" fill-opacity="0.18"
+                            stroke="currentColor" stroke-width="2"
+                            stroke-linejoin="round"/>`,
       },
       {
         value: "uniform",
         label: "Uniform",
-        sub: "Boxy multimeter, USB drive",
-        points: null,  // rectangle — drawn as <rect> instead of <polygon>
+        // Plain rectangle, vertical sides.
+        shape: svg`<rect x="14" y="8" width="36" height="36"
+                         fill="currentColor" fill-opacity="0.18"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linejoin="round"/>`,
       },
       {
         value: "bottom",
         label: "Widest at bottom",
-        sub: "Stud finder, mouse, gadget",
-        // Trapezoid wider at bottom, narrower at top.
-        points: "8,32 32,32 24,12 16,12",
+        // Bottom 4→60 (56 wide), top 22→42 (20 wide) — tapers inward.
+        shape: svg`<polygon points="4,44 60,44 42,8 22,8"
+                            fill="currentColor" fill-opacity="0.18"
+                            stroke="currentColor" stroke-width="2"
+                            stroke-linejoin="round"/>`,
       },
     ];
     return html`
@@ -733,20 +768,11 @@ class PicForm extends LitElement {
               <input type="radio" name="tool_taper" .value=${o.value}
                      .checked=${value === o.value}
                      @change=${() => this._emit("tool_taper", o.value)}>
-              <svg viewBox="0 0 40 40" width="56" height="56" aria-hidden="true">
-                <line x1="2" y1="33" x2="38" y2="33"
-                      stroke="currentColor" stroke-width="1" opacity="0.4"/>
-                ${o.points
-                  ? html`<polygon points=${o.points} fill="currentColor"
-                                  fill-opacity="0.15" stroke="currentColor"
-                                  stroke-width="1.6" stroke-linejoin="round"/>`
-                  : html`<rect x="10" y="12" width="20" height="20"
-                               fill="currentColor" fill-opacity="0.15"
-                               stroke="currentColor" stroke-width="1.6"
-                               stroke-linejoin="round"/>`}
+              <svg viewBox="0 0 64 56" width="80" height="64" aria-hidden="true">
+                ${ground}
+                ${o.shape}
               </svg>
               <span class="taper-label">${o.label}</span>
-              <span class="taper-sub">${o.sub}</span>
             </label>
           `)}
         </div>

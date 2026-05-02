@@ -10,6 +10,7 @@ without it the second concurrent submission would OOM the GPU.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import threading
 import time
@@ -46,6 +47,9 @@ class JobState:
     layout_result: Optional[dict] = None
     final_result: Optional[dict] = None
     error: Optional[str] = None
+    # Optional user-provided label, sanitized to filesystem-safe chars.
+    # When set, drives the download filename for each artifact.
+    part_name: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def to_summary(self) -> dict:
@@ -125,11 +129,17 @@ class JobManager:
             target.write_bytes(data)
             saved_paths.append(target)
 
+        # part_name is a user-facing label only — never used as a filesystem
+        # path on the server. Sanitize aggressively to keep download
+        # filenames clean and avoid Content-Disposition surprises.
+        part_name = sanitize_part_name(params.pop("part_name", ""))
+
         state = JobState(
             id=job_id,
             output_dir=job_dir,
             params=dict(params),
             input_image_paths=saved_paths,
+            part_name=part_name,
         )
         with self._jobs_lock:
             self._jobs[job_id] = state
@@ -328,6 +338,47 @@ def _pipeline_kwargs(params: dict) -> dict:
     if "tool_heights" in out:
         out["tool_heights"] = _normalize_tool_heights(out["tool_heights"])
     return out
+
+
+# Original artifact filename → friendly suffix used when part_name is set.
+# Result: <part_name>_<suffix>. Original filenames stay on disk; this only
+# affects what the browser saves.
+_DOWNLOAD_SUFFIX = {
+    "layout_preview.png": "preview.png",
+    "layout_actual_size.pdf": "layout.pdf",
+    "layout_actual_size.svg": "layout.svg",
+    "combined_layout.dxf": "layout.dxf",
+    "bin_config.json": "bin_config.json",
+}
+
+
+def sanitize_part_name(value) -> str:
+    """Reduce a user-supplied label to filesystem-safe characters.
+
+    Keeps letters, digits, underscores, and hyphens. Whitespace runs collapse
+    to a single underscore. Leading/trailing punctuation is trimmed and the
+    result is capped at 64 chars. Returns an empty string for falsy input
+    or input that has nothing safe left after stripping.
+    """
+    if not value:
+        return ""
+    s = re.sub(r"\s+", "_", str(value).strip())
+    s = re.sub(r"[^A-Za-z0-9_\-]", "", s)
+    s = s.strip("_-")
+    return s[:64]
+
+
+def download_filename(part_name: str, artifact_name: str) -> str:
+    """Compute the download filename shown to the user.
+
+    With ``part_name`` set, returns ``<part_name>_<friendly suffix>`` where
+    the friendly suffix drops the verbose internal name (e.g.
+    ``layout_actual_size.pdf`` → ``layout.pdf``). Without a part_name, falls
+    back to the original artifact filename.
+    """
+    if part_name and artifact_name in _DOWNLOAD_SUFFIX:
+        return f"{part_name}_{_DOWNLOAD_SUFFIX[artifact_name]}"
+    return artifact_name
 
 
 def _normalize_tool_heights(value):
