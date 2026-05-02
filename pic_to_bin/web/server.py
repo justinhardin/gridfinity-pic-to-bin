@@ -53,6 +53,11 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
             yield
         finally:
             cleanup_task.cancel()
+            # Tell active SSE subscribers to exit so EventSourceResponse can
+            # close cleanly before uvicorn cancels their tasks. Yield once
+            # so the awaiting generators get a chance to run.
+            job_manager.signal_subscribers_shutdown()
+            await asyncio.sleep(0)
             job_manager.shutdown()
 
     app = FastAPI(title="pic-to-bin", lifespan=lifespan)

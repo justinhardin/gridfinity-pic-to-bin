@@ -193,6 +193,37 @@ def test_subscribe_replays_then_streams(mgr, fake_pipeline):
     assert "layout_ready" in seen
 
 
+def test_signal_subscribers_shutdown_unblocks_subscribers(mgr, fake_pipeline):
+    """Active subscribers should exit cleanly when shutdown is signaled."""
+    async def go():
+        loop = asyncio.get_running_loop()
+        mgr.bind_loop(loop)
+        job = mgr.create_job(
+            params={"tool_heights": 17.0},
+            input_files=[("a.png", b"X")],
+        )
+        # Don't submit phase A — keep the job idle so the subscriber blocks
+        # on the empty queue, exactly like the real Ctrl-C scenario where
+        # users are sitting on the preview screen.
+        seen = []
+
+        async def consume():
+            async for ev in mgr.subscribe(job):
+                seen.append(ev)
+
+        consumer = asyncio.create_task(consume())
+        # Let the consumer start awaiting on the queue.
+        await asyncio.sleep(0.05)
+        assert not consumer.done(), "subscriber should be blocked, not done"
+
+        mgr.signal_subscribers_shutdown()
+        # The consumer should exit on its own once it sees the sentinel.
+        await asyncio.wait_for(consumer, timeout=1.0)
+        assert seen == [], "sentinel should not be yielded as a regular event"
+
+    asyncio.run(go())
+
+
 def test_tool_heights_string_keys_are_coerced(mgr, fake_pipeline):
     """Frontend sends JSON object keys as strings; pipeline needs ints."""
     job = mgr.create_job(

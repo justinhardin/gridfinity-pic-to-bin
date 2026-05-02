@@ -33,6 +33,13 @@ class JobStatus(str, Enum):
     ERROR = "error"
 
 
+# Sentinel pushed to every subscriber queue during app shutdown so the SSE
+# generator exits its await loop and EventSourceResponse can close its stream
+# before uvicorn cancels the task. Without it, uvicorn logs "ASGI callable
+# returned without completing response" for every active connection on Ctrl-C.
+_SHUTDOWN_SENTINEL = object()
+
+
 @dataclass
 class JobState:
     id: str
@@ -260,7 +267,8 @@ class JobManager:
         """Async generator of event dicts. Replays log first, then streams.
 
         Closes when a terminal status event (``complete`` or ``error``) is
-        delivered.
+        delivered, or when ``signal_subscribers_shutdown`` pushes a sentinel
+        during app shutdown.
         """
         queue: asyncio.Queue = asyncio.Queue()
         with job._lock:
@@ -270,6 +278,8 @@ class JobManager:
         try:
             while True:
                 ev = await queue.get()
+                if ev is _SHUTDOWN_SENTINEL:
+                    return
                 yield ev
                 if ev.get("step") in ("complete", "error"):
                     return
@@ -277,6 +287,27 @@ class JobManager:
             with job._lock:
                 if queue in job.subscribers:
                     job.subscribers.remove(queue)
+
+    def signal_subscribers_shutdown(self) -> None:
+        """Push the shutdown sentinel to every active subscriber queue.
+
+        Called from the asyncio loop during app shutdown so SSE generators
+        exit cleanly and EventSourceResponse can flush its closing frame
+        before uvicorn cancels the task.
+        """
+        with self._jobs_lock:
+            jobs = list(self._jobs.values())
+        for job in jobs:
+            with job._lock:
+                queues = list(job.subscribers)
+            for q in queues:
+                try:
+                    q.put_nowait(_SHUTDOWN_SENTINEL)
+                except asyncio.QueueFull:
+                    # Queues are unbounded so this shouldn't happen, but if
+                    # it ever does, the awaiter will be cancelled by uvicorn
+                    # in the next phase anyway.
+                    pass
 
     # -- TTL cleanup ---------------------------------------------------------
 
