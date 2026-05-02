@@ -64,8 +64,21 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
+        # Cache-bust the JS/CSS by appending each file's mtime as a query
+        # string. The browser caches them happily when unchanged but
+        # re-fetches as soon as we edit the source — no manual hard-refresh.
         index_path = STATIC_DIR / "index.html"
-        return HTMLResponse(index_path.read_text(encoding="utf-8"))
+        html_text = index_path.read_text(encoding="utf-8")
+        for asset in ("app.js", "styles.css"):
+            asset_path = STATIC_DIR / asset
+            if asset_path.exists():
+                v = int(asset_path.stat().st_mtime)
+                html_text = html_text.replace(
+                    f"/static/{asset}", f"/static/{asset}?v={v}"
+                )
+        return HTMLResponse(
+            html_text, headers={"cache-control": "no-cache"}
+        )
 
     # ---- Job endpoints -----------------------------------------------------
 

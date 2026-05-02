@@ -230,6 +230,12 @@ class PicApp extends LitElement {
     this.modalField = null;
     this._artifactKey = 0;
     this._eventSource = null;
+    // Track which transition events have already been acted on. The server
+    // replays the full event_log on every SSE reconnect, so layout_ready /
+    // complete arrive again after every idle disconnect; without these flags
+    // the preview img refetches each time and the page flickers.
+    this._seenLayoutReady = false;
+    this._seenComplete = false;
   }
 
   connectedCallback() {
@@ -418,6 +424,7 @@ class PicApp extends LitElement {
     this.formValues = { ...this.formValues, ...params };
     this.screen = "progress";
     this.eventLog = [];
+    this._seenLayoutReady = false;
     const res = await fetch(`/jobs/${this.jobId}/redo`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -442,6 +449,8 @@ class PicApp extends LitElement {
     this.artifacts = {};
     this.errorMessage = null;
     this.eventLog = [];
+    this._seenLayoutReady = false;
+    this._seenComplete = false;
   };
 
   // ---- SSE plumbing -------------------------------------------------------
@@ -468,15 +477,23 @@ class PicApp extends LitElement {
   }
 
   async _onLayoutReady() {
+    if (this._seenLayoutReady) return;
+    this._seenLayoutReady = true;
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.layoutInfo = summary;
-    // Bump the cache key once when fresh artifacts arrive, so the preview
-    // image reloads on redo but doesn't flicker on every Lit render cycle.
     this._artifactKey = Date.now();
     this.screen = "preview";
   }
 
   async _onComplete() {
+    if (this._seenComplete) return;
+    this._seenComplete = true;
+    // Job is done — close the SSE so the browser stops auto-reconnecting
+    // and re-replaying the event log on the downloads screen.
+    if (this._eventSource) {
+      this._eventSource.close();
+      this._eventSource = null;
+    }
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.artifacts = summary.artifacts || {};
     this._artifactKey = Date.now();
