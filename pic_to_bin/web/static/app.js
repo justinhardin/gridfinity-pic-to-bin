@@ -411,6 +411,16 @@ class PicApp extends LitElement {
 
     this.screen = "progress";
     this.eventLog = [];
+    // Clear state from any previous job. Critical for the back-button flow:
+    // user goes preview → back → form → submit again. Without resetting the
+    // _seen* flags the second job's layout_ready / complete arrive but
+    // get dropped by the replay-dedupe guard, leaving the user stuck on the
+    // progress screen.
+    this.layoutInfo = null;
+    this.artifacts = {};
+    this.errorMessage = null;
+    this._seenLayoutReady = false;
+    this._seenComplete = false;
 
     let res;
     try {
