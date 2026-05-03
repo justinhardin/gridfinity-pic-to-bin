@@ -737,3 +737,70 @@ button.secondary:hover {
 @keyframes thumb-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ---------- Advanced (collapsible) card ---------- */
+
+/* The whole card is a <details>; the summary IS the card heading and the
+   click target. Override the inner-section dashed-border style that
+   `details` got from the now-removed nested-tracing-tuning block. */
+details.advanced-card {
+  margin-top: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--shadow-sm);
+  background: var(--card-bg);
+}
+
+details.advanced-card > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  font-weight: inherit;
+  font-size: inherit;
+  color: var(--fg);
+}
+
+details.advanced-card > summary::-webkit-details-marker { display: none; }
+details.advanced-card > summary::marker { content: ""; }
+
+details.advanced-card > summary h2 {
+  margin: 0;
+}
+
+details.advanced-card[open] > summary {
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+
+.advanced-toggle-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+details.advanced-card[open] .advanced-toggle-hint::before {
+  content: "▾ ";
+}
+
+details.advanced-card:not([open]) .advanced-toggle-hint::before {
+  content: "▸ ";
+}
+
+.advanced-subhead {
+  margin: 1.25rem 0 0.65rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.02em;
+}
+
+.advanced-subhead:first-of-type {
+  margin-top: 0;
+}

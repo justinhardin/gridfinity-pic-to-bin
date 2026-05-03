@@ -648,8 +648,13 @@ class PicForm extends LitElement {
         ${this._renderTaperField()}
       </div>
 
-      <div class="card">
-        <h2>4. Tool fitting</h2>
+      <details class="card advanced-card">
+        <summary class="advanced-summary">
+          <h2>4. Advanced <span class="card-h2-sub">(optional)</span></h2>
+          <span class="advanced-toggle-hint">Click to expand</span>
+        </summary>
+
+        <h3 class="advanced-subhead">Tool fitting</h3>
         <div class="field-row">
           ${this._renderField("tolerance", "number", { step: 0.1 })}
           ${this._renderField("axial_tolerance", "number", { step: 0.1 })}
@@ -658,10 +663,8 @@ class PicForm extends LitElement {
           ${this._renderField("gap", "number", { step: 0.1 })}
           ${this._renderField("bin_margin", "number", { step: 0.1 })}
         </div>
-      </div>
 
-      <div class="card">
-        <h2>5. Bin sizing</h2>
+        <h3 class="advanced-subhead">Bin sizing</h3>
         <div class="field-row">
           ${this._renderField("min_units", "number", { step: 1 })}
           ${this._renderField("max_units", "number", { step: 1 })}
@@ -672,20 +675,18 @@ class PicForm extends LitElement {
           ${this._renderField("slots", "checkbox")}
         </div>
 
-        <details>
-          <summary>Advanced (tracing tuning)</summary>
-          <p class="hint section-hint">
-            These tune the SAM2 cleanup and vectorization. Defaults are good
-            for most photos — only change if your traces look noisy or wrong.
-          </p>
-          <div class="field-row">
-            ${this._renderField("straighten_threshold", "number", { step: 1 })}
-            ${this._renderField("max_refine_iterations", "number", { step: 1 })}
-            ${this._renderField("max_concavity_depth", "number", { step: 0.1 })}
-            ${this._renderField("mask_erode", "number", { step: 0.05 })}
-          </div>
-        </details>
-      </div>
+        <h3 class="advanced-subhead">Tracing tuning</h3>
+        <p class="hint section-hint">
+          These tune the SAM2 cleanup and vectorization. Defaults are good
+          for most photos — only change if your traces look noisy or wrong.
+        </p>
+        <div class="field-row">
+          ${this._renderField("straighten_threshold", "number", { step: 1 })}
+          ${this._renderField("max_refine_iterations", "number", { step: 1 })}
+          ${this._renderField("max_concavity_depth", "number", { step: 0.1 })}
+          ${this._renderField("mask_erode", "number", { step: 0.05 })}
+        </div>
+      </details>
 
       <div class="card submit-card">
         <button class="primary" ?disabled=${!allHeightsSet}
