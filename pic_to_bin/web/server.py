@@ -10,6 +10,7 @@ GET  /jobs/{id}/events          → SSE stream of progress events
 POST /jobs/{id}/proceed         → run Phase B (bin_config.json)
 POST /jobs/{id}/redo            → re-run with adjusted params
 GET  /jobs/{id}/artifacts/{fn}  → download layout_preview.png / combined_layout.dxf / bin_config.json
+POST /preview                   → convert a HEIC/HEIF upload to a small JPEG thumbnail
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -197,6 +198,38 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
             media_type=media_type,
             filename=download_filename(job.part_name, filename),
         )
+
+    @app.post("/preview")
+    async def preview(image: UploadFile = File(...)) -> Response:
+        """Convert a HEIC/HEIF upload to a small JPEG thumbnail.
+
+        Used by the form's drop-zone preview. Browsers (Chrome, Firefox,
+        Edge) can't render HEIC natively, and the heic2any wasm shim
+        bundles an old libheif that fails on modern iPhone HEIC variants.
+        Routing through pillow-heif (already a core dep, used by the
+        ingest pipeline) gives us one HEIC decoder that handles every
+        format the actual pipeline can.
+        """
+        ext = Path(image.filename or "").suffix.lower()
+        if ext not in {".heic", ".heif"}:
+            raise HTTPException(400, "only HEIC/HEIF accepted")
+        data = await image.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        # Lazy import — avoids loading PIL on the cold start path; the
+        # pipeline's segment_tool already pulls these in for HEIC inputs.
+        from io import BytesIO
+        from PIL import Image
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        try:
+            img = Image.open(BytesIO(data))
+            img.thumbnail((400, 400))  # small thumbnail; preview only
+            out = BytesIO()
+            img.convert("RGB").save(out, format="JPEG", quality=70)
+        except Exception as e:  # noqa: BLE001 — surface to browser
+            raise HTTPException(400, f"could not decode HEIC: {e}")
+        return Response(content=out.getvalue(), media_type="image/jpeg")
 
     @app.exception_handler(Exception)
     async def unhandled(_request: Request, exc: Exception):

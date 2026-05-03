@@ -589,34 +589,6 @@ function showInfo(el, field) {
 
 const _isHeic = (filename) => /\.(heic|heif)$/i.test(filename || "");
 
-// heic2any ships only a UMD bundle that wraps libheif WASM; CDN ESM shims
-// (esm.sh, jsdelivr +esm) reliably mangle the libheif loader on import.
-// Load it as a regular UMD script tag instead and resolve via window.heic2any.
-const HEIC2ANY_URL = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
-let _heic2anyPromise = null;
-
-function _loadHeic2Any() {
-  if (window.heic2any) return Promise.resolve(window.heic2any);
-  if (_heic2anyPromise) return _heic2anyPromise;
-  _heic2anyPromise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = HEIC2ANY_URL;
-    script.async = true;
-    script.onload = () => {
-      if (window.heic2any) resolve(window.heic2any);
-      else reject(new Error("heic2any loaded but did not register on window"));
-    };
-    script.onerror = () => reject(new Error(`Failed to fetch heic2any from ${HEIC2ANY_URL}`));
-    document.head.appendChild(script);
-  }).catch(err => {
-    // Reset so a subsequent upload can retry instead of being stuck on the
-    // cached rejected promise.
-    _heic2anyPromise = null;
-    throw err;
-  });
-  return _heic2anyPromise;
-}
-
 class PicForm extends LitElement {
   static properties = {
     files: { type: Array },
@@ -963,16 +935,20 @@ class PicForm extends LitElement {
   }
 
   async _readDataUrl(file) {
-    // Most browsers (Chrome, Firefox, Edge) can't render HEIC/HEIF natively
-    // — only Safari does. Convert via heic2any (lazy-loaded; ~1.5 MB WASM
-    // fetched only when a HEIC file is first uploaded) so users on every
-    // browser see a real thumbnail. The Python pipeline still ingests HEIC
-    // directly via pillow-heif; this is purely about the browser preview.
+    // Browsers other than Safari can't render HEIC. The bundled-WASM
+    // shims (heic2any) ship an old libheif that fails on modern iPhone
+    // HEIC variants — POST to the server's /preview endpoint instead,
+    // which decodes via pillow-heif (the same lib the ingest pipeline
+    // uses, so it handles whatever the pipeline supports).
     if (_isHeic(file.name)) {
       try {
-        const heic2any = await _loadHeic2Any();
-        const out = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.5 });
-        const blob = Array.isArray(out) ? out[0] : out;
+        const fd = new FormData();
+        fd.append("image", file, file.name);
+        const res = await fetch("/preview", { method: "POST", body: fd });
+        if (!res.ok) {
+          throw new Error(`/preview HTTP ${res.status}: ${await res.text()}`);
+        }
+        const blob = await res.blob();
         return URL.createObjectURL(blob);
       } catch (err) {
         console.warn(`HEIC preview failed for ${file.name}:`, err);
