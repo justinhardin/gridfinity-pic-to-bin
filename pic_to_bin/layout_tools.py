@@ -818,6 +818,86 @@ def generate_preview(placed_tools: list[PlacedTool],
     plt.close()
 
 
+def generate_fit_test_drawing(placed_tools: list[PlacedTool],
+                              grid_units_x: int, grid_units_y: int,
+                              output_path: str,
+                              gridfinity_unit: float = 42.0) -> None:
+    """Render the layout at 1:1 physical scale for printing.
+
+    The output page is sized to the bin's exact mm dimensions, with no
+    title, no axes, and no padding — so when the user prints at "Actual
+    size" / "100% scale" they get a paper template they can lay physical
+    tools on top of to verify fit before 3D printing.
+
+    Saves to PDF or SVG (chosen by the file extension). Both formats encode
+    physical units, so the resulting print is dimensionally accurate
+    regardless of printer DPI.
+    """
+    bin_w = grid_units_x * gridfinity_unit  # mm
+    bin_h = grid_units_y * gridfinity_unit
+
+    fig = plt.figure(figsize=(bin_w / 25.4, bin_h / 25.4))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, bin_w)
+    ax.set_ylim(0, bin_h)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # Light grid lines on each gridfinity unit boundary.
+    for i in range(grid_units_x + 1):
+        ax.plot([i * gridfinity_unit, i * gridfinity_unit], [0, bin_h],
+                color="#cccccc", linewidth=0.25)
+    for j in range(grid_units_y + 1):
+        ax.plot([0, bin_w], [j * gridfinity_unit, j * gridfinity_unit],
+                color="#cccccc", linewidth=0.25)
+
+    # Bin outline.
+    ax.add_patch(mpatches.Rectangle((0, 0), bin_w, bin_h,
+                                     fill=False, edgecolor="black",
+                                     linewidth=0.5))
+
+    for placed in placed_tools:
+        rotated = _apply_transform(placed.tool, placed.rotation_deg,
+                                   placed.mirrored)
+        ox, oy = placed.offset_x, placed.offset_y
+        # Inner trace — thin solid line (the actual tool outline).
+        for poly in rotated.inner_polys:
+            pts = np.array([(x + ox, y + oy) for x, y in poly])
+            ax.plot(np.append(pts[:, 0], pts[0, 0]),
+                    np.append(pts[:, 1], pts[0, 1]),
+                    color="black", linewidth=0.4)
+        # Tolerance outline — dashed (shows the actual pocket shape).
+        for poly in rotated.tolerance_polys:
+            pts = np.array([(x + ox, y + oy) for x, y in poly])
+            ax.plot(np.append(pts[:, 0], pts[0, 0]),
+                    np.append(pts[:, 1], pts[0, 1]),
+                    color="black", linewidth=0.25, linestyle=(0, (3, 2)))
+
+    plt.savefig(output_path)
+    plt.close()
+
+    # Matplotlib writes SVG dimensions in "pt" (points). That's an absolute
+    # unit, but some image viewers misinterpret it. Rewrite the root width/
+    # height in "mm" so the file is unambiguous about its physical size.
+    if str(output_path).lower().endswith(".svg"):
+        _svg_set_mm_dimensions(output_path, bin_w, bin_h)
+
+
+def _svg_set_mm_dimensions(svg_path: str, width_mm: float, height_mm: float) -> None:
+    """Rewrite the root <svg> width/height attributes to mm units."""
+    import re
+    p = Path(svg_path)
+    text = p.read_text(encoding="utf-8")
+    # Only touch the first <svg ...> tag.
+    def fix(match: "re.Match[str]") -> str:
+        tag = match.group(0)
+        tag = re.sub(r'\swidth="[^"]+"', f' width="{width_mm:.4f}mm"', tag, count=1)
+        tag = re.sub(r'\sheight="[^"]+"', f' height="{height_mm:.4f}mm"', tag, count=1)
+        return tag
+    text = re.sub(r"<svg\b[^>]*>", fix, text, count=1)
+    p.write_text(text, encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -869,11 +949,22 @@ def layout_tools(dxf_paths: list[str], gap_mm: float = 3.0,
     generate_preview(placed, units_x, units_y, str(preview_path),
                      gridfinity_unit=gridfinity_unit)
 
+    # Generate 1:1 scale fit-test drawings for printing.
+    fit_pdf = output_dir / "layout_actual_size.pdf"
+    fit_svg = output_dir / "layout_actual_size.svg"
+    print(f"Generating 1:1 fit-test PDF/SVG: {fit_pdf.name}, {fit_svg.name}")
+    generate_fit_test_drawing(placed, units_x, units_y, str(fit_pdf),
+                              gridfinity_unit=gridfinity_unit)
+    generate_fit_test_drawing(placed, units_x, units_y, str(fit_svg),
+                              gridfinity_unit=gridfinity_unit)
+
     print(f"\nDone! Layout: {units_x}x{units_y} gridfinity units")
 
     return {
         "combined_dxf_path": str(dxf_path),
         "preview_path": str(preview_path),
+        "fit_test_pdf_path": str(fit_pdf),
+        "fit_test_svg_path": str(fit_svg),
         "grid_units_x": units_x,
         "grid_units_y": units_y,
         "grid_mm_x": bin_w,

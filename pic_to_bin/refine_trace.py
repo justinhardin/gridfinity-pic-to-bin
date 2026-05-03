@@ -270,6 +270,7 @@ def refine_trace(
     dpi: int = 200,
     clearance_mm: float = 0.0,
     tolerance_mm: float = 0.0,
+    axial_tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -281,6 +282,7 @@ def refine_trace(
     mask_erode_mm: float = 0.3,
     tool_height_mm: float = 0.0,
     phone_height_mm: float = 0.0,
+    tool_taper: str = "top",
     finger_slots: bool = True,
 ) -> dict:
     """Run trace_tool iteratively, adjusting cleanup params to preserve concavities.
@@ -383,11 +385,13 @@ def refine_trace(
     result = trace_from_mask(
         raw_mask, stem, dpi=dpi,
         clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
+        axial_tolerance_mm=axial_tolerance_mm,
         alphamax=alphamax, turdsize=turdsize, opttolerance=opttolerance,
         straighten_threshold=straighten_threshold,
         output_dir=str(output_dir),
         tool_height_mm=tool_height_mm,
         phone_height_mm=phone_height_mm,
+        tool_taper=tool_taper,
         finger_slots=finger_slots,
         **params.to_dict(),
     )

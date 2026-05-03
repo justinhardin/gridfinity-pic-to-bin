@@ -142,6 +142,71 @@ def _offset_polygons(polygons: list[list[tuple[float, float]]],
     return offset_polygons
 
 
+def _principal_axis_angle(polygons: list[list[tuple[float, float]]]) -> float:
+    """Return the angle (radians) of the principal axis of the union of all
+    points in `polygons`, computed via PCA. 0 means horizontal."""
+    pts = [p for poly in polygons for p in poly]
+    if len(pts) < 2:
+        return 0.0
+    arr = np.array(pts, dtype=float)
+    centered = arr - arr.mean(axis=0)
+    # SVD of the (centered) point cloud — first right-singular vector is the
+    # principal axis direction.
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    axis = vh[0]
+    return float(np.arctan2(axis[1], axis[0]))
+
+
+def _axial_stretch_polygons(polygons: list[list[tuple[float, float]]],
+                            axial_extra_mm: float,
+                            ) -> list[list[tuple[float, float]]]:
+    """Add extra clearance along the principal axis only.
+
+    Compensates for SAM2 mask under-detection at tapered tool tips: the
+    uniform offset shrinks tip coverage proportionally more than handle
+    coverage, so the printed pocket fits the wide section of the tool but
+    is too tight at the ends. This stretches the polygon along its principal
+    axis so each end gets `axial_extra_mm` of additional clearance, leaving
+    the centerline (perpendicular extent) unchanged.
+
+    The stretch is a linear ramp in the rotated frame: a point at
+    fractional axial distance t (t ∈ [-1, 1] across the bbox) shifts
+    outward by t * axial_extra_mm. This means features along the axis
+    stretch slightly too — fine for typical hand tools, less ideal for
+    tools with internal axis-parallel features (rare).
+    """
+    if abs(axial_extra_mm) < 0.001 or not polygons:
+        return polygons
+
+    angle = _principal_axis_angle(polygons)
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    # Rotate-to-axis matrix: R^T  (so axis aligns with X in rotated frame).
+    rot = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
+    inv_rot = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+
+    # Project all points to the rotated frame to find centroid + extent.
+    all_pts = np.array([p for poly in polygons for p in poly], dtype=float)
+    rotated = all_pts @ rot.T
+    cx = float(rotated[:, 0].mean())
+    half_extent = float(max(rotated[:, 0].max() - cx, cx - rotated[:, 0].min()))
+    if half_extent < 1e-6:
+        return polygons
+
+    # Stretch factor: a point at half_extent gets pushed outward by
+    # axial_extra_mm. (half_extent + axial_extra) / half_extent is the
+    # multiplier on the centered axial coordinate.
+    scale_x = (half_extent + axial_extra_mm) / half_extent
+
+    out: list[list[tuple[float, float]]] = []
+    for poly in polygons:
+        arr = np.array(poly, dtype=float)
+        rot_pts = arr @ rot.T
+        rot_pts[:, 0] = cx + (rot_pts[:, 0] - cx) * scale_x
+        back = rot_pts @ inv_rot.T
+        out.append([(float(x), float(y)) for x, y in back])
+    return out
+
+
 def _simplify_polygon(polygon: list[tuple[float, float]],
                        epsilon: float = 0.3) -> list[tuple[float, float]]:
     """Simplify polygon using the Douglas-Peucker algorithm.
@@ -774,6 +839,7 @@ def _scale_svg_path_coords(d: str, factor: float) -> str:
 
 def potrace_to_dxf(path, output_path: str, scale: float,
                    clearance_mm: float = 0.0, tolerance_mm: float = 0.0,
+                   axial_tolerance_mm: float = 0.0,
                    img_shape: tuple = None, simplify_epsilon: float = 0.3,
                    slot_polygon: list = None):
     """Export potrace path to DXF format, optionally with a tolerance outline.
@@ -789,6 +855,10 @@ def potrace_to_dxf(path, output_path: str, scale: float,
         scale: mm per pixel
         clearance_mm: Outward offset for printing tolerance
         tolerance_mm: Additional outward offset for the tolerance perimeter
+        axial_tolerance_mm: Extra clearance along the tool's principal axis
+            (each end pushed outward by this amount), applied after the
+            uniform tolerance. Compensates for SAM2 under-detection at
+            tapered tool tips.
         img_shape: (height, width) of source mask to filter boundary artifacts
         simplify_epsilon: Douglas-Peucker simplification threshold in mm
     """
@@ -819,6 +889,9 @@ def potrace_to_dxf(path, output_path: str, scale: float,
     # offset 0; positive expands the pocket, negative shrinks it.
     doc.layers.add("TOLERANCE", color=3)  # green for visual distinction
     outer_polygons = _offset_polygons(inner_polygons, tolerance_mm)
+    if abs(axial_tolerance_mm) > 0.001:
+        outer_polygons = _axial_stretch_polygons(outer_polygons,
+                                                 axial_tolerance_mm)
     outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
                       for p in outer_polygons]
     outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]

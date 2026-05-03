@@ -154,10 +154,11 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     print(f"  Segmentation: SAM2 ({sam_model})")
     print(f"  Mask shape: {mask.shape}, tool pixels: {np.count_nonzero(mask)}")
 
-    # On bright backgrounds, recover dark tool regions (e.g. black metal
-    # handles) that SAM2 may exclude.  Uses Otsu thresholding to find all
-    # non-background pixels and adds threshold-connected regions back.
-    mask = _recover_bright_bg_missed(mask, gray)
+    # On bright backgrounds, recover tool regions (dark handles AND saturated
+    # colored regions like yellow labels) that SAM2 may exclude. Uses an
+    # HSV-based score to find non-background pixels and adds threshold-
+    # connected regions back.
+    mask = _recover_bright_bg_missed(mask, gray, hsv)
 
     # Refine mask using original image brightness to carve out interior
     # gaps (e.g. handle gaps on pliers) that SAM may fill.
@@ -214,24 +215,34 @@ def _extract_best_mask(results, img_h: int, img_w: int) -> np.ndarray:
     return mask
 
 
-def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
-    """Recover dark tool regions that SAM2 missed on bright backgrounds.
+def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray,
+                              hsv: np.ndarray) -> np.ndarray:
+    """Recover tool regions that SAM2 missed on bright backgrounds.
 
     On white/bright backgrounds (e.g. white paper under the scanner lid),
-    SAM2 may exclude dark surfaces (black metal handles, pivot mechanisms)
-    that contrast differently from the main tool body (orange/colored grips).
-    These dark surfaces are clearly non-background in a simple threshold,
-    but SAM2's neural segmentation doesn't associate them with the object.
+    SAM2 may exclude parts of a multi-tone tool — black metal handles next
+    to colored grips, OR a black case wrapping a saturated label (e.g. the
+    yellow ZIRCON insert in a black stud-finder body). These regions are
+    clearly non-background, but SAM2's neural segmentation segments only one
+    sub-region as the "object".
 
     Strategy:
     1. Detect bright background (median > 128).
-    2. Otsu threshold finds all non-background pixels (both coloured and dark).
+    2. Threshold a "distance from background" score — max(saturation, 255-value)
+       — so both saturated colors AND dark pixels count as foreground. Plain
+       grayscale Otsu fails here: bright yellow (gray ~225) is too close to
+       white paper (~250), so a yellow region adjacent to a black region gets
+       split off into the background class.
     3. Connected components of the threshold mask identify contiguous
        foreground blobs.
     4. Any threshold component that overlaps the SAM2 mask is part of the
-       tool — its full extent (including dark areas SAM2 missed) is added.
-    5. Safety: if recovery would grow the mask by more than 50%, skip
-       (suggests threshold noise connecting to scanner-edge artifacts).
+       tool — its full extent (including regions SAM2 missed) is added.
+    5. Safety: if the recovered mask would cover more than 50% of the image
+       area, skip (suggests threshold noise connecting through the SAM mask
+       to scanner-edge artifacts). The earlier "more than 50% of the SAM
+       mask" rule failed when SAM segmented one half of a multi-tone tool
+       (e.g. yellow label inside a black case) — the missed half can be
+       legitimately larger than the segmented half.
 
     Only runs on bright backgrounds.  Dark-background scans use
     ``_refine_mask_with_image`` instead (which carves interior gaps).
@@ -239,9 +250,10 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
     Args:
         mask: Binary mask (uint8, 0/255) from SAM2
         gray: Grayscale original image (same dimensions as mask)
+        hsv: HSV original image (same dimensions as mask)
 
     Returns:
-        Mask with recovered dark regions (or original mask if not applicable)
+        Mask with recovered regions (or original mask if not applicable)
     """
     tool_region = mask > 128
     bg_region = ~tool_region
@@ -253,9 +265,13 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
     if bg_median <= 60:
         return mask  # dark background — handled by _refine_mask_with_image
 
-    # Otsu threshold: all non-background pixels
+    # Otsu threshold on a colorimetric "distance from white" score so both
+    # saturated colors and dark pixels are treated as foreground.
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    score = np.maximum(sat, 255 - val)
     _, thresh = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # Light cleanup — close small gaps, remove noise specks
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -280,17 +296,21 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray) -> np.ndarray:
         return mask
 
     original_size = int(np.count_nonzero(tool_region))
-    ratio = added / original_size if original_size > 0 else 0
+    final_size = original_size + added
+    image_area = mask.shape[0] * mask.shape[1]
+    image_fraction = final_size / image_area
 
-    if ratio > 0.5:
-        print(f"  Bright-bg recovery: SKIPPED — would add {added} px "
-              f"({100 * ratio:.0f}% of mask, exceeds 50% limit)")
+    if image_fraction > 0.5:
+        print(f"  Bright-bg recovery: SKIPPED — would cover {100 * image_fraction:.0f}% "
+              f"of image (exceeds 50% limit; suggests threshold noise)")
         return mask
 
     recovered = mask.copy()
     recovered[recovery] = 255
+    ratio = added / original_size if original_size > 0 else 0
     print(f"  Bright-bg recovery: added {added} px "
-          f"({100 * ratio:.1f}% of mask)")
+          f"({100 * ratio:.0f}% of original mask, "
+          f"final mask is {100 * image_fraction:.0f}% of image)")
     return recovered
 
 
@@ -743,6 +763,7 @@ def trace_from_mask(
     dpi: int = 200,
     clearance_mm: float = 0.0,
     tolerance_mm: float = 0.0,
+    axial_tolerance_mm: float = 0.0,
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -755,6 +776,7 @@ def trace_from_mask(
     output_dir: str = "generated",
     tool_height_mm: float = 0.0,
     phone_height_mm: float = 0.0,
+    tool_taper: str = "top",
     finger_slots: bool = True,
 ) -> dict:
     """Run cleanup → straighten → vectorize → export on a pre-segmented mask.
@@ -788,25 +810,44 @@ def trace_from_mask(
     scale = 25.4 / dpi
 
     # Parallax compensation: a tool of thickness tool_height_mm photographed
-    # from height phone_height_mm appears larger than reality because its top
-    # surface sits closer to the camera than the marker plane. The homography
-    # corrects perspective on the marker plane only; objects above z=0 still
-    # get inflated by H/(H-z). For a flat-bottomed tool with vertical-ish
-    # sides (most hand tools — screwdrivers, pliers, hammers, wrenches), the
-    # silhouette as seen from overhead is bounded by the top face: the bottom
-    # edge is hidden behind it, so the visible outline tracks z=tool_height,
-    # not the mid-height. Using half-height under-compensates by ~2-3% per
-    # axis, which is invisible on short dimensions but several mm on long
-    # ones. Shrink mm-per-pixel by the inverse so every downstream polygon
-    # (inner, tolerance, slot) lands at true mm.
+    # from height phone_height_mm appears larger than reality because surfaces
+    # above z=0 sit closer to the camera and get inflated by H/(H-z). The
+    # homography corrects perspective on the marker plane only.
+    #
+    # Which z to use depends on the tool's profile (tool_taper):
+    #
+    #   "top"     — tool widens going up (screwdrivers, pliers, hammers,
+    #               wrenches with flared handles). The top face occludes
+    #               the bottom edge, so the visible silhouette tracks z =
+    #               tool_height_mm. Shrink fully.
+    #   "uniform" — vertical sides (boxy multimeters, batteries, USB drives).
+    #               Top and bottom outlines are identical, but the top face
+    #               is closer to the camera and thus projects larger; the
+    #               silhouette is the top face projection. Shrink fully —
+    #               same factor as "top".
+    #   "bottom"  — tool tapers inward going up (Zircon stud finder, mouse,
+    #               anything with a wide base and a narrower top). The
+    #               bottom outline is wider than the projected top, so the
+    #               visible silhouette tracks z = 0. No shrink.
+    #
+    # Defaults to "top" because the original target tools (screwdrivers /
+    # pliers / wrenches) all fall in that bucket and that was the only
+    # behavior before this option existed.
     if phone_height_mm > 0 and tool_height_mm > 0:
-        z = tool_height_mm
-        if z < phone_height_mm:
+        if tool_taper == "bottom":
+            z = 0.0
+        else:  # "top" or "uniform"
+            z = tool_height_mm
+        if 0 < z < phone_height_mm:
             parallax_factor = (phone_height_mm - z) / phone_height_mm
             scale *= parallax_factor
             print(f"  Parallax compensation: phone={phone_height_mm:.0f}mm, "
-                  f"tool={tool_height_mm:.1f}mm, factor={parallax_factor:.4f} "
+                  f"tool={tool_height_mm:.1f}mm, taper={tool_taper}, "
+                  f"factor={parallax_factor:.4f} "
                   f"({(1 - parallax_factor) * 100:.1f}% shrink)")
+        else:
+            print(f"  Parallax compensation: skipped "
+                  f"(taper={tool_taper}, z={z:.0f}mm)")
 
     if abs(tolerance_mm) > 0.001:
         sign = "expand" if tolerance_mm > 0 else "shrink"
@@ -860,6 +901,7 @@ def trace_from_mask(
     dxf_path = output_dir / f"{stem}_trace.dxf"
     potrace_to_dxf(path, str(dxf_path), scale=scale,
                    clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
+                   axial_tolerance_mm=axial_tolerance_mm,
                    img_shape=mask.shape, slot_polygon=slot_polygon)
     print(f"  Saved DXF: {dxf_path}")
 
