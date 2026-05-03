@@ -613,7 +613,7 @@ class PicForm extends LitElement {
           ${this._renderInfoLink("part_name", "What is this?")}
         </div>
         <input type="text" class="part-name-input"
-               placeholder="e.g. zircon_stud_finder"
+               placeholder="Your Tool Name"
                .value=${this.formValues.part_name ?? ""}
                @input=${(e) => this._emit("part_name", e.target.value)}>
         <p class="hint">Used as a prefix for downloaded filenames. Leave blank to keep defaults.</p>
