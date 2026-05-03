@@ -587,6 +587,8 @@ function showInfo(el, field) {
   }));
 }
 
+const _isHeic = (filename) => /\.(heic|heif)$/i.test(filename || "");
+
 class PicForm extends LitElement {
   static properties = {
     files: { type: Array },
@@ -698,13 +700,37 @@ class PicForm extends LitElement {
     `;
   }
 
+  _renderThumbImage(f) {
+    if (f.dataUrl) {
+      return html`<img src=${f.dataUrl} alt=${f.file.name}>`;
+    }
+    if (f.converting) {
+      return html`
+        <div class="thumb-placeholder converting">
+          <span class="thumb-spinner" aria-hidden="true"></span>
+          <span>Converting HEIC…</span>
+        </div>
+      `;
+    }
+    if (_isHeic(f.file.name)) {
+      // heic2any failed — keep the form usable but show a clear placeholder.
+      return html`
+        <div class="thumb-placeholder">
+          <strong>HEIC</strong>
+          <span>Preview unavailable</span>
+        </div>
+      `;
+    }
+    return html`<img src=${f.dataUrl} alt=${f.file.name}>`;
+  }
+
   _renderThumbs() {
     if (this.files.length === 0) return nothing;
     return html`
       <div class="thumbs">
         ${this.files.map((f, i) => html`
           <div class="thumb">
-            <img src=${f.dataUrl} alt=${f.file.name}>
+            ${this._renderThumbImage(f)}
             <div class="name" title=${f.file.name}>${f.file.name}</div>
             <label class="thumb-field">
               <span class="thumb-label">
@@ -882,19 +908,52 @@ class PicForm extends LitElement {
   };
 
   async _addFiles(fileList) {
-    const next = [...this.files];
-    for (const file of Array.from(fileList)) {
-      const dataUrl = await this._readDataUrl(file);
-      next.push({ file, toolHeight: null, dataUrl });
+    // Add files to state immediately with placeholder previews so the user
+    // sees thumbnails right away. HEIC takes a couple of seconds to convert
+    // via heic2any (libheif WASM), so we don't want to block the form.
+    const incoming = Array.from(fileList).map(file => ({
+      file,
+      toolHeight: null,
+      dataUrl: "",
+      converting: _isHeic(file.name),
+    }));
+    this.dispatchEvent(new CustomEvent("files-changed", {
+      detail: [...this.files, ...incoming],
+    }));
+
+    // Resolve each preview asynchronously, dispatching updates as they
+    // complete. Re-read this.files each iteration so a removal or another
+    // add operation while a conversion is in flight isn't clobbered.
+    for (const entry of incoming) {
+      const dataUrl = await this._readDataUrl(entry.file);
+      const updated = this.files.map(e => e.file === entry.file
+        ? { ...e, dataUrl, converting: false }
+        : e
+      );
+      this.dispatchEvent(new CustomEvent("files-changed", { detail: updated }));
     }
-    this.dispatchEvent(new CustomEvent("files-changed", { detail: next }));
   }
 
-  _readDataUrl(file) {
+  async _readDataUrl(file) {
+    // Most browsers (Chrome, Firefox, Edge) can't render HEIC/HEIF natively
+    // — only Safari does. Convert via heic2any (lazy-loaded; ~1.5 MB WASM
+    // fetched only when a HEIC file is first uploaded) so users on every
+    // browser see a real thumbnail. The Python pipeline still ingests HEIC
+    // directly via pillow-heif; this is purely about the browser preview.
+    if (_isHeic(file.name)) {
+      try {
+        const { default: heic2any } = await import("heic2any");
+        const out = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.5 });
+        const blob = Array.isArray(out) ? out[0] : out;
+        return URL.createObjectURL(blob);
+      } catch (err) {
+        console.warn(`HEIC preview failed for ${file.name}:`, err);
+        return "";
+      }
+    }
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
-      // HEIC won't render as a thumbnail in most browsers; show a placeholder.
       reader.onerror = () => resolve("");
       reader.readAsDataURL(file);
     });
