@@ -1,10 +1,10 @@
-import { LitElement, html, svg, css, nothing } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 
 // Pipeline parameter metadata. Mirrors pipeline.run_pipeline kwargs.
-// "Hard required" = fields the user must touch (no default).
 // "Soft default" = fields with a default that we highlight until the user
 // touches them, so they consciously confirm or change the value.
-const SOFT_DEFAULT_FIELDS = new Set(["phone_height"]);
+// (Currently empty — phone_height moved to backend EXIF auto-detect.)
+const SOFT_DEFAULT_FIELDS = new Set();
 
 // Must match TOLERANCE_BASELINE_MM in pipeline.py — used in modal copy only.
 const TOLERANCE_BASELINE_MM = 2.0;
@@ -14,7 +14,6 @@ const FORM_DEFAULTS = {
   paper_size: "legal",
   tolerance: 0.0,
   axial_tolerance: 1.0,
-  phone_height: 482.0,
   tool_taper: "top",
   gap: 3.0,
   bin_margin: 0.0,
@@ -27,12 +26,12 @@ const FORM_DEFAULTS = {
   max_refine_iterations: 5,
   max_concavity_depth: 3.0,
   mask_erode: 0.0,
+  display_smooth_sigma: 2.5,
 };
 
 // Which fields, when changed on a redo, force a re-trace (expensive).
 // Everything else is layout-only (cheap; cached DXFs reused).
 const TRACE_REQUIRED_FIELDS = new Set([
-  "phone_height",
   "tool_taper",
   "tolerance",
   "axial_tolerance",
@@ -41,6 +40,7 @@ const TRACE_REQUIRED_FIELDS = new Set([
   "max_refine_iterations",
   "max_concavity_depth",
   "mask_erode",
+  "display_smooth_sigma",
 ]);
 
 // Detailed per-field documentation. The key matches the form-field name; the
@@ -72,24 +72,14 @@ const FIELD_INFO = {
       "Pick the size you actually printed — the homography uses the marker positions for that size to compute the millimeter scale.",
     ],
   },
-  phone_height: {
-    title: "Phone height (mm)",
-    hint: "Camera height above the paper. Compensates parallax.",
-    body: [
-      "How far the phone camera was from the paper when you took the photo.",
-      "A tool that sits above the paper appears slightly larger in the photo than it really is. The pipeline compensates by scaling the trace down by phone_height / (phone_height − tool_height/2).",
-      "482 mm is a reasonable default for hand-held overhead shots. Lower values apply more aggressive compensation; set to 0 to disable parallax correction entirely.",
-    ],
-  },
   tool_taper: {
     title: "Tool side profile",
     hint: "Where the tool is widest, viewed from the side. Affects parallax.",
     body: [
-      "Pick the side-profile shape closest to your tool. The pipeline uses this to decide which height to use when compensating for parallax — tools that taper inward (wider at the bottom) need no compensation, while tools that flare outward at the top need the full correction.",
-      "Widest at top — handles, grips, anything that flares out at the top. Most hand tools fall here: screwdrivers, pliers, hammers, wrenches.",
-      "Uniform — vertical sides, top outline matches bottom outline. Boxy multimeters, batteries, USB drives, blocks of metal.",
+      "Pick the side-profile shape closest to your tool. The pipeline uses this to decide which height to use when compensating for parallax — tools that taper inward (wider at the bottom) need no compensation, while tools that flare outward at the top or have vertical sides need the full correction.",
+      "Widest at top or uniform — flares outward at the top, or has vertical sides where the top and bottom outlines match. Most hand tools fall here (screwdrivers, pliers, hammers, wrenches with flared handles), as do boxy items (multimeters, batteries, USB drives). Both share the same parallax math because the visible silhouette is dominated by the top of the tool either way.",
       "Widest at bottom — tapers inward going up. Zircon stud finders, computer mice, phone cases, tape-measure cases.",
-      "Picking the wrong option makes the trace a few percent too small or too big, with the error growing with tool height. For a 30 mm-tall tool at the default 482 mm phone height, the swing between options is around 6%.",
+      "Picking the wrong option makes the trace a few percent too small or too big, with the error growing with tool height. For a 30 mm-tall tool at typical hand-held distance the swing between options is around 3 %; for a 100 mm-tall tool it's about 10 %.",
     ],
   },
   tolerance: {
@@ -204,6 +194,15 @@ const FIELD_INFO = {
       "Increase to 0.3–0.5 mm only if your photo has a visible shadow halo and the trace clearly extends beyond the tool's actual outline.",
     ],
   },
+  display_smooth_sigma: {
+    title: "Smoothing strength (mm)",
+    hint: "Smooths SAM2 noise on reflective surfaces. Default 2.5 mm.",
+    body: [
+      "Gaussian smoothing applied to the trace polygon perpendicular to the tool's principal axis. SAM2 produces wave-noise on polished metal blades; this knob removes it.",
+      "Increase (3–5 mm) if reflective tools like scissor blades come out with a visibly wavy outline. Decrease (or set to 0) if the trace is over-smoothing intentional features — e.g. a bracket whose 90° corners are showing up rounded.",
+      "Sharp corners are preserved automatically by curvature-aware blending regardless of this value, but moderately curved features still soften at higher settings. Default 2.5 mm balances both cases.",
+    ],
+  },
   fit_test: {
     title: "Print at actual size to test fit",
     hint: "Print, lay the tool on top, and verify before 3D printing.",
@@ -218,16 +217,17 @@ const FIELD_INFO = {
 };
 
 // ---------------------------------------------------------------------------
-// Root: state machine across screens
+// Root: single scrolling page. Each pipeline phase reveals a new section
+// below the form rather than navigating away from it.
 // ---------------------------------------------------------------------------
 
 class PicApp extends LitElement {
   static properties = {
-    screen: { state: true },        // "form" | "progress" | "preview" | "downloads" | "error"
     jobId: { state: true },
     files: { state: true },         // [{file: File, toolHeight: number|null, dataUrl: string}]
     formValues: { state: true },    // dict of form field values
     touched: { state: true },       // Set of field names the user has touched
+    running: { state: true },       // a job phase is in flight
     layoutInfo: { state: true },
     artifacts: { state: true },
     errorMessage: { state: true },
@@ -240,11 +240,11 @@ class PicApp extends LitElement {
 
   constructor() {
     super();
-    this.screen = "form";
     this.jobId = null;
     this.files = [];
     this.formValues = { ...FORM_DEFAULTS };
     this.touched = new Set();
+    this.running = false;
     this.layoutInfo = null;
     this.artifacts = {};
     this.errorMessage = null;
@@ -258,58 +258,153 @@ class PicApp extends LitElement {
     // the preview img refetches each time and the page flickers.
     this._seenLayoutReady = false;
     this._seenComplete = false;
+    // Sections that were visible last render — used to scroll the newly-
+    // revealed one into view when state changes.
+    this._prevVisible = new Set();
   }
 
   connectedCallback() {
     super.connectedCallback();
     // Children dispatch CustomEvent("show-info", {detail: {field}, bubbles: true})
-    // and we render the modal here so it works on every screen.
+    // and we render the modal here so it works for any section.
     this._showInfoHandler = (e) => { this.modalField = e.detail.field; };
     this.addEventListener("show-info", this._showInfoHandler);
     this._escHandler = (e) => {
       if (e.key === "Escape" && this.modalField) this.modalField = null;
     };
     window.addEventListener("keydown", this._escHandler);
-
-    // Browser back/forward navigates between screens instead of leaving the
-    // app. The initial state is replaceState (not push) so back from the
-    // form still leaves the site as the user expects.
-    if (history.state == null || history.state.screen == null) {
-      history.replaceState({ screen: this.screen }, "");
-    }
-    this._popstateHandler = (e) => {
-      const target = e.state?.screen ?? "form";
-      this._fromHistory = true;
-      this.screen = target;
-    };
-    window.addEventListener("popstate", this._popstateHandler);
+    // ?job=<uuid> in the URL means "resume that job". Fire-and-forget;
+    // the async restore updates state once the server summary comes back.
+    this._restoreFromUrl();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this.removeEventListener("show-info", this._showInfoHandler);
     window.removeEventListener("keydown", this._escHandler);
-    window.removeEventListener("popstate", this._popstateHandler);
   }
 
-  updated(changed) {
-    if (changed.has("screen")) {
-      if (!this._fromHistory) {
-        history.pushState({ screen: this.screen }, "");
-      }
-      this._fromHistory = false;
+  // ---- URL <-> jobId sync -------------------------------------------------
+
+  _setJobInUrl(jobId) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("job", jobId);
+    history.replaceState(history.state, "", url.toString());
+  }
+
+  _clearJobFromUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("job");
+    history.replaceState(history.state, "", url.toString());
+  }
+
+  async _restoreFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const jobId = params.get("job");
+    if (!jobId) return;
+
+    let res;
+    try {
+      res = await fetch(`/jobs/${encodeURIComponent(jobId)}`);
+    } catch (e) {
+      this.errorMessage = `Failed to load job: ${e.message}`;
+      this._clearJobFromUrl();
+      return;
+    }
+    if (res.status === 404) {
+      this.errorMessage =
+        `Job ${jobId.slice(0, 8)}… not found on this server. ` +
+        `It may have expired or the server was restarted.`;
+      this._clearJobFromUrl();
+      return;
+    }
+    if (!res.ok) {
+      this.errorMessage = `Failed to load job: HTTP ${res.status}`;
+      this._clearJobFromUrl();
+      return;
+    }
+
+    const summary = await res.json();
+    this.jobId = jobId;
+    const hasLayout = !!summary.artifacts?.layout_preview;
+    const hasFinal = !!summary.artifacts?.bin_config;
+
+    if (hasLayout) {
+      this.layoutInfo = summary;
+      this._artifactKey = Date.now();
+      this._seenLayoutReady = true;
+    }
+    if (hasFinal) {
+      this.artifacts = summary.artifacts || {};
+    }
+    if (summary.status === "complete") {
+      this._seenComplete = true;
+      // No SSE connection — terminal state. Progress section stays hidden
+      // since eventLog is empty; the user picks up at preview + downloads.
+    } else if (summary.status === "error") {
+      this.errorMessage = summary.error || "Pipeline error.";
+    } else {
+      // pending / running / awaiting_decision / finalizing — live job.
+      // Connect SSE: the server replays event_log on subscribe, so the
+      // progress card populates with everything that has happened so far,
+      // then keeps streaming live updates. `running` reflects whether a
+      // phase is in flight (anything but awaiting_decision).
+      this.running = summary.status !== "awaiting_decision";
+      this._connectEvents(jobId);
     }
   }
 
+  updated(_changed) {
+    const visible = this._visibleSections();
+    for (const id of visible) {
+      if (!this._prevVisible.has(id)) {
+        const el = this.querySelector(`#section-${id}`);
+        if (el) {
+          requestAnimationFrame(() => {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        }
+      }
+    }
+    this._prevVisible = visible;
+  }
+
+  _visibleSections() {
+    const v = new Set();
+    if (this.running || this.eventLog.length > 0) v.add("progress");
+    if (this.errorMessage) v.add("error");
+    if (this.layoutInfo) v.add("preview");
+    if (this.artifacts && Object.keys(this.artifacts).length > 0) v.add("downloads");
+    return v;
+  }
+
   render() {
-    let screen;
-    if (this.screen === "form")           screen = this._renderForm();
-    else if (this.screen === "progress")  screen = this._renderProgress();
-    else if (this.screen === "preview")   screen = this._renderPreview();
-    else if (this.screen === "downloads") screen = this._renderDownloads();
-    else if (this.screen === "error")     screen = this._renderError();
-    else screen = nothing;
-    return html`${screen}${this._renderModal()}`;
+    return html`
+      <section id="section-form">
+        ${this._renderForm()}
+      </section>
+      ${this.running || this.eventLog.length > 0 ? html`
+        <section id="section-progress">
+          ${this._renderProgress()}
+        </section>
+      ` : nothing}
+      ${this.errorMessage ? html`
+        <section id="section-error">
+          ${this._renderError()}
+        </section>
+      ` : nothing}
+      ${this.layoutInfo ? html`
+        <section id="section-preview">
+          ${this._renderPreview()}
+        </section>
+      ` : nothing}
+      ${this.artifacts && Object.keys(this.artifacts).length > 0 ? html`
+        <section id="section-downloads">
+          ${this._renderDownloads()}
+        </section>
+      ` : nothing}
+      ${this._renderModal()}
+    `;
   }
 
   _renderModal() {
@@ -335,14 +430,18 @@ class PicApp extends LitElement {
     `;
   }
 
-  // ---- Screens ------------------------------------------------------------
+  // ---- Sections -----------------------------------------------------------
 
   _renderForm() {
+    const hasResult = this.layoutInfo != null ||
+      (this.artifacts && Object.keys(this.artifacts).length > 0);
     return html`
       <pic-form
         .files=${this.files}
         .formValues=${this.formValues}
         .touched=${this.touched}
+        .running=${this.running}
+        .submitLabel=${hasResult ? "Re-run with current values" : "Generate bin"}
         @files-changed=${(e) => { this.files = e.detail; }}
         @field-changed=${this._onFieldChange}
         @submit-job=${this._submitJob}
@@ -364,6 +463,9 @@ class PicApp extends LitElement {
         .jobId=${this.jobId}
         .layoutInfo=${this.layoutInfo}
         .artifactKey=${this._artifactKey}
+        .llmAvailable=${!!this.layoutInfo?.llm_available}
+        .currentParams=${this.formValues}
+        .running=${this.running}
         @proceed=${this._onProceed}
         @redo=${this._onRedo}
       ></pic-preview>
@@ -382,9 +484,14 @@ class PicApp extends LitElement {
 
   _renderError() {
     return html`
-      <div class="card">
+      <div class="card error-card">
         <div class="error-banner">${this.errorMessage}</div>
-        <button class="secondary" @click=${this._reset}>Start over</button>
+        <div class="actions">
+          <button class="secondary" @click=${() => { this.errorMessage = null; }}>
+            Dismiss
+          </button>
+          <button class="secondary" @click=${this._reset}>Start over</button>
+        </div>
       </div>
     `;
   }
@@ -409,13 +516,14 @@ class PicApp extends LitElement {
       fd.append("images", f.file, f.file.name);
     }
 
-    this.screen = "progress";
+    // Tear down any prior SSE so a re-submit doesn't get duplicate events
+    // from the previous job's stream.
+    if (this._eventSource) {
+      this._eventSource.close();
+      this._eventSource = null;
+    }
+    this.running = true;
     this.eventLog = [];
-    // Clear state from any previous job. Critical for the back-button flow:
-    // user goes preview → back → form → submit again. Without resetting the
-    // _seen* flags the second job's layout_ready / complete arrive but
-    // get dropped by the replay-dedupe guard, leaving the user stuck on the
-    // progress screen.
     this.layoutInfo = null;
     this.artifacts = {};
     this.errorMessage = null;
@@ -436,11 +544,13 @@ class PicApp extends LitElement {
     }
     const { job_id } = await res.json();
     this.jobId = job_id;
+    this._setJobInUrl(job_id);
     this._connectEvents(job_id);
   };
 
   _onProceed = async () => {
-    this.screen = "progress";
+    this.running = true;
+    this.errorMessage = null;
     this.eventLog = [...this.eventLog, {
       step: "bin_config", message: "Generating bin config...", fraction: 0.5,
     }];
@@ -454,9 +564,15 @@ class PicApp extends LitElement {
   _onRedo = async (e) => {
     const { params, layoutOnly } = e.detail;
     this.formValues = { ...this.formValues, ...params };
-    this.screen = "progress";
+    this.running = true;
     this.eventLog = [];
+    // Drop the stale layout/downloads so the user doesn't see an outdated
+    // preview while the redo runs; they'll re-appear on layout_ready/complete.
+    this.layoutInfo = null;
+    this.artifacts = {};
+    this.errorMessage = null;
     this._seenLayoutReady = false;
+    this._seenComplete = false;
     const res = await fetch(`/jobs/${this.jobId}/redo`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -472,17 +588,21 @@ class PicApp extends LitElement {
       this._eventSource.close();
       this._eventSource = null;
     }
-    this.screen = "form";
     this.jobId = null;
     this.files = [];
     this.formValues = { ...FORM_DEFAULTS };
     this.touched = new Set();
+    this.running = false;
     this.layoutInfo = null;
     this.artifacts = {};
     this.errorMessage = null;
     this.eventLog = [];
     this._seenLayoutReady = false;
     this._seenComplete = false;
+    this._clearJobFromUrl();
+    // Take the user back to the top of the page so they're looking at the
+    // freshly-cleared form, not wherever the prior run left them scrolled.
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   // ---- SSE plumbing -------------------------------------------------------
@@ -502,9 +622,27 @@ class PicApp extends LitElement {
         this._fail(ev.message || "pipeline error");
       }
     };
+    // The server emits a "session_lost" event (with retry: 0) when the job
+    // ID isn't in the in-memory registry — typical after a server restart.
+    // Treat it as a soft failure: stop the browser's auto-reconnect, show
+    // a friendly error, and let the user start over instead of leaving the
+    // tab silently retrying.
+    es.addEventListener("session_lost", (msg) => {
+      try {
+        const ev = JSON.parse(msg.data);
+        this._fail(
+          ev.message ||
+          "Session lost — the server has restarted. Start over to continue."
+        );
+      } catch {
+        this._fail("Session lost — the server has restarted. Start over to continue.");
+      }
+    });
     es.onerror = () => {
-      // EventSource auto-reconnects; only fail the UI if we're not already
-      // in a terminal state.
+      // EventSource auto-reconnects on transport-level errors; we only
+      // surface a hard failure when the server has explicitly told us via
+      // the session_lost event handler above. Transient network blips are
+      // left to the browser's default retry behavior.
     };
   }
 
@@ -514,14 +652,16 @@ class PicApp extends LitElement {
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.layoutInfo = summary;
     this._artifactKey = Date.now();
-    this.screen = "preview";
+    // Phase A is done; the user is now looking at the preview deciding
+    // whether to proceed. Re-enable the form's submit button.
+    this.running = false;
   }
 
   async _onComplete() {
     if (this._seenComplete) return;
     this._seenComplete = true;
     // Job is done — close the SSE so the browser stops auto-reconnecting
-    // and re-replaying the event log on the downloads screen.
+    // and re-replaying the event log once the downloads section is up.
     if (this._eventSource) {
       this._eventSource.close();
       this._eventSource = null;
@@ -529,12 +669,12 @@ class PicApp extends LitElement {
     const summary = await (await fetch(`/jobs/${this.jobId}`)).json();
     this.artifacts = summary.artifacts || {};
     this._artifactKey = Date.now();
-    this.screen = "downloads";
+    this.running = false;
   }
 
   _fail(message) {
     this.errorMessage = message;
-    this.screen = "error";
+    this.running = false;
     if (this._eventSource) {
       this._eventSource.close();
       this._eventSource = null;
@@ -560,6 +700,12 @@ class PicApp extends LitElement {
     const params = { tool_heights };
     for (const [k, v] of Object.entries(this.formValues)) {
       if (v === "" || v == null) continue;
+      // SOFT_DEFAULT_FIELDS are displayed with a default value in the form
+      // for context (so users see what the pipeline will use), but the
+      // backend has a smarter per-photo auto-detect that should win unless
+      // the user explicitly typed something. Drop these from the params
+      // payload while they're still untouched so the backend takes over.
+      if (SOFT_DEFAULT_FIELDS.has(k) && !this.touched.has(k)) continue;
       if (typeof v === "boolean") {
         params[k] = v;
       } else if (typeof v === "number") {
@@ -594,6 +740,8 @@ class PicForm extends LitElement {
     files: { type: Array },
     formValues: { type: Object },
     touched: { type: Object },
+    running: { type: Boolean },
+    submitLabel: { type: String },
     dragOver: { state: true },
   };
   createRenderRoot() { return this; }
@@ -601,11 +749,14 @@ class PicForm extends LitElement {
   constructor() {
     super();
     this.dragOver = false;
+    this.running = false;
+    this.submitLabel = "Generate bin";
   }
 
   render() {
     const allHeightsSet = this.files.length > 0 &&
       this.files.every(f => f.toolHeight != null && f.toolHeight !== "" && !isNaN(f.toolHeight));
+    const submitDisabled = !allHeightsSet || this.running;
     return html`
       <div class="card">
         <div class="card-header">
@@ -643,7 +794,6 @@ class PicForm extends LitElement {
           ${this._renderField("paper_size", "select", {
             options: ["a4", "letter", "legal"],
           })}
-          ${this._renderField("phone_height", "number", { step: 1 })}
         </div>
         ${this._renderTaperField()}
       </div>
@@ -685,13 +835,14 @@ class PicForm extends LitElement {
           ${this._renderField("max_refine_iterations", "number", { step: 1 })}
           ${this._renderField("max_concavity_depth", "number", { step: 0.1 })}
           ${this._renderField("mask_erode", "number", { step: 0.05 })}
+          ${this._renderField("display_smooth_sigma", "number", { step: 0.1 })}
         </div>
       </details>
 
       <div class="card submit-card">
-        <button class="primary" ?disabled=${!allHeightsSet}
+        <button class="primary" ?disabled=${submitDisabled}
                 @click=${() => this.dispatchEvent(new CustomEvent("submit-job"))}>
-          Generate bin
+          ${this.running ? "Working…" : this.submitLabel}
         </button>
         ${!allHeightsSet ? html`
           <p class="hint">Drop at least one photo and fill in tool height to enable.</p>
@@ -754,43 +905,50 @@ class PicForm extends LitElement {
     const info = FIELD_INFO.tool_taper;
     const value = this.formValues.tool_taper;
     // Side-profile silhouettes on a ground line. Trapezoid points use
-    // viewBox 0 0 64 56 — bottom edge at y=44, top at y=8, sides flared
-    // so the difference between top/bottom widths is visually obvious.
-    const ground = svg`<line x1="2" y1="48" x2="62" y2="48"
-                             stroke="currentColor" stroke-width="1.5"
-                             opacity="0.35"/>`;
-    const shapeAttrs = `fill="currentColor" fill-opacity="0.18"
-                        stroke="currentColor" stroke-width="2"
-                        stroke-linejoin="round"`;
+    // bottom edge at y=44, top at y=8 so the top/bottom width difference
+    // is visually obvious.
+    //
+    // "top" and "uniform" use identical parallax math (same z = tool_height),
+    // so they're presented as a single radio that emits "top". Both
+    // silhouettes are shown side by side inside the option so users can
+    // recognize either shape as theirs.
     const options = [
       {
         value: "top",
-        label: "Widest at top",
-        // Bottom 22→42 (20 wide), top 4→60 (56 wide) — flares outward.
-        shape: svg`<polygon points="22,44 42,44 60,8 4,8"
-                            fill="currentColor" fill-opacity="0.18"
-                            stroke="currentColor" stroke-width="2"
-                            stroke-linejoin="round"/>`,
-      },
-      {
-        value: "uniform",
-        label: "Uniform",
-        // Plain rectangle, vertical sides.
-        shape: svg`<rect x="14" y="8" width="36" height="36"
-                         fill="currentColor" fill-opacity="0.18"
-                         stroke="currentColor" stroke-width="2"
-                         stroke-linejoin="round"/>`,
+        label: "Widest at top or uniform",
+        icon: html`
+          <svg viewBox="0 0 132 56" width="148" height="64" aria-hidden="true">
+            <line x1="2" y1="48" x2="62" y2="48"
+                  stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
+            <line x1="70" y1="48" x2="130" y2="48"
+                  stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
+            <polygon points="22,44 42,44 60,8 4,8"
+                     fill="currentColor" fill-opacity="0.18"
+                     stroke="currentColor" stroke-width="2"
+                     stroke-linejoin="round"/>
+            <rect x="82" y="8" width="36" height="36"
+                  fill="currentColor" fill-opacity="0.18"
+                  stroke="currentColor" stroke-width="2"
+                  stroke-linejoin="round"/>
+          </svg>`,
       },
       {
         value: "bottom",
         label: "Widest at bottom",
-        // Bottom 4→60 (56 wide), top 22→42 (20 wide) — tapers inward.
-        shape: svg`<polygon points="4,44 60,44 42,8 22,8"
-                            fill="currentColor" fill-opacity="0.18"
-                            stroke="currentColor" stroke-width="2"
-                            stroke-linejoin="round"/>`,
+        icon: html`
+          <svg viewBox="0 0 64 56" width="80" height="64" aria-hidden="true">
+            <line x1="2" y1="48" x2="62" y2="48"
+                  stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
+            <polygon points="4,44 60,44 42,8 22,8"
+                     fill="currentColor" fill-opacity="0.18"
+                     stroke="currentColor" stroke-width="2"
+                     stroke-linejoin="round"/>
+          </svg>`,
       },
     ];
+    // "uniform" is still a valid backend value (CLI/legacy form data); map
+    // it onto the combined "top" radio for display purposes only.
+    const selectedValue = value === "uniform" ? "top" : value;
     return html`
       <div class="field taper-field">
         <label class="field-label">
@@ -801,14 +959,11 @@ class PicForm extends LitElement {
         </label>
         <div class="taper-options" role="radiogroup">
           ${options.map(o => html`
-            <label class="taper-option ${value === o.value ? "selected" : ""}">
+            <label class="taper-option ${selectedValue === o.value ? "selected" : ""}">
               <input type="radio" name="tool_taper" .value=${o.value}
-                     .checked=${value === o.value}
+                     .checked=${selectedValue === o.value}
                      @change=${() => this._emit("tool_taper", o.value)}>
-              <svg viewBox="0 0 64 56" width="80" height="64" aria-hidden="true">
-                ${ground}
-                ${o.shape}
-              </svg>
+              ${o.icon}
               <span class="taper-label">${o.label}</span>
             </label>
           `)}
@@ -1088,21 +1243,64 @@ customElements.define("pic-progress", PicProgress);
 // pic-preview — layout preview with proceed/redo
 // ---------------------------------------------------------------------------
 
+// Pretty labels for the diff list shown to the user when the LLM suggests
+// parameter changes. Keys must match the suggested_params schema in
+// pic_to_bin/web/llm_check.py.
+const SUGGESTED_PARAM_LABELS = {
+  tolerance: "Tolerance (mm)",
+  axial_tolerance: "Axial tolerance (mm)",
+  display_smooth_sigma: "Smoothing strength (mm)",
+  mask_erode: "Mask erosion (mm)",
+  bin_margin: "Bin margin (mm)",
+  gap: "Gap (mm)",
+};
+
 class PicPreview extends LitElement {
   static properties = {
     jobId: { type: String },
     layoutInfo: { type: Object },
     artifactKey: { type: Number },
-    showRedo: { state: true },
-    redoParams: { state: true },
+    llmAvailable: { type: Boolean },
+    currentParams: { type: Object },
+    running: { type: Boolean },
+    llmBusy: { state: true },
+    llmVerdict: { state: true },
+    llmIterations: { state: true },
+    llmOverlays: { state: true },   // [{stem, url}] returned by /llm_evaluate
+    llmError: { state: true },
+    llmAutoLoop: { state: true },
+    llmMaxIterations: { state: true },
+    showAdvanced: { state: true },
   };
   createRenderRoot() { return this; }
 
   constructor() {
     super();
-    this.showRedo = false;
-    this.redoParams = {};
     this.artifactKey = 0;
+    this.llmAvailable = false;
+    this.currentParams = {};
+    this.running = false;
+    this.llmBusy = false;
+    this.llmVerdict = null;
+    this.llmIterations = 0;
+    this.llmOverlays = [];
+    this.llmError = null;
+    this.llmAutoLoop = false;
+    this.llmMaxIterations = 3;
+    this.showAdvanced = false;
+  }
+
+  // pic-app sets `currentParams` and `layoutInfo` before each render. When the
+  // backend regenerates the layout (after auto-loop or manual redo), we want
+  // any stale verdict that referenced the OLD layout to clear so the user
+  // sees the fresh preview unbiased by yesterday's reasoning.
+  willUpdate(changed) {
+    if (changed.has("artifactKey") && this.llmVerdict !== null) {
+      this.llmVerdict = null;
+      this.llmIterations = 0;
+      this.llmOverlays = [];
+      this.llmError = null;
+    }
   }
 
   render() {
@@ -1148,69 +1346,204 @@ class PicPreview extends LitElement {
         </div>
       ` : nothing}
 
+      ${this.llmError ? html`
+        <div class="card llm-verdict-card error">
+          <p class="hint"><strong>LLM check failed.</strong> ${this.llmError}</p>
+        </div>
+      ` : nothing}
+
+      ${this.llmVerdict ? this._renderVerdictCard() : nothing}
+
       <div class="card">
         <h2>Looks good?</h2>
         <div class="actions">
-          <button class="primary" @click=${() => this.dispatchEvent(new CustomEvent("proceed"))}>
-            Proceed → generate bin config
-          </button>
-          <button class="secondary" @click=${() => this.showRedo = !this.showRedo}>
-            ${this.showRedo ? "Hide re-do options" : "Re-do with adjustments"}
-          </button>
-        </div>
-      </div>
-      ${this.showRedo ? this._renderRedoPanel() : nothing}
-    `;
-  }
-
-  _renderRedoPanel() {
-    const traceFields = TRACE_REQUIRED_FIELDS;
-    const willRetrace = Object.keys(this.redoParams).some(k => traceFields.has(k));
-    return html`
-      <div class="card">
-        <h3>Re-do parameters</h3>
-        <p class="hint">Only the fields you change here will be applied.
-          ${willRetrace
-            ? html`<strong>Re-tracing required</strong> (slower) — your changes affect the trace step.`
-            : html`Layout-only re-run (fast) — using cached traces.`}
-        </p>
-        <div class="field-row">
-          ${this._redoNum("tolerance", "Tolerance (mm)", 0.1)}
-          ${this._redoNum("axial_tolerance", "Axial tolerance (mm)", 0.1)}
-          ${this._redoNum("gap", "Gap (mm)", 0.1)}
-          ${this._redoNum("bin_margin", "Bin margin (mm)", 0.1)}
-          ${this._redoNum("min_units", "Min units", 1)}
-          ${this._redoNum("max_units", "Max units", 1)}
-          ${this._redoNum("height_units", "Height units", 1)}
-          ${this._redoNum("phone_height", "Phone height (mm)", 1)}
-        </div>
-        <div class="actions">
           <button class="primary"
-                  @click=${() => this.dispatchEvent(new CustomEvent("redo", {
-                    detail: { params: this.redoParams, layoutOnly: !willRetrace },
-                  }))}>
-            Re-run pipeline
+                  ?disabled=${this.llmBusy || this.running}
+                  @click=${() => this.dispatchEvent(new CustomEvent("proceed"))}>
+            ${this.running ? "Working…" : "Proceed → generate bin config"}
           </button>
+          ${this.llmAvailable ? html`
+            <button class="primary llm-button"
+                    ?disabled=${this.llmBusy || this.running}
+                    @click=${this._onCheckWithLlm}>
+              ${this.llmBusy
+                ? (this.llmAutoLoop
+                    ? html`Asking LLM (auto-loop)…`
+                    : html`Asking LLM…`)
+                : html`Check or refine with LLM`}
+            </button>
+          ` : nothing}
         </div>
+        ${this._renderAdvancedToggle()}
       </div>
     `;
   }
 
-  _redoNum(name, label, step) {
+  _renderAdvancedToggle() {
+    if (!this.llmAvailable) return nothing;
     return html`
-      <div class="field">
-        <label>${label}</label>
-        <input type="number" step=${step}
-               @input=${(e) => {
-                 const v = e.target.value;
-                 const next = { ...this.redoParams };
-                 if (v === "") delete next[name];
-                 else next[name] = Number(v);
-                 this.redoParams = next;
-               }}>
+      <div class="advanced-llm">
+        <button class="advanced-toggle" type="button"
+                @click=${() => this.showAdvanced = !this.showAdvanced}
+                aria-expanded=${this.showAdvanced ? "true" : "false"}>
+          ${this.showAdvanced ? "▾" : "▸"} Advanced
+        </button>
+        ${this.showAdvanced ? html`
+          <div class="advanced-llm-body">
+            <label class="checkbox">
+              <input type="checkbox"
+                     .checked=${this.llmAutoLoop}
+                     @change=${(e) => this.llmAutoLoop = e.target.checked}>
+              Auto-loop until LLM approves (or max iterations reached)
+            </label>
+            <label class="field">
+              Max iterations
+              <input type="number" min="1" max="10" step="1"
+                     .value=${String(this.llmMaxIterations)}
+                     @input=${(e) => {
+                       const v = parseInt(e.target.value, 10);
+                       if (!isNaN(v)) this.llmMaxIterations = Math.max(1, Math.min(10, v));
+                     }}
+                     ?disabled=${!this.llmAutoLoop}>
+            </label>
+            <p class="hint">
+              When enabled, the LLM's suggested parameter changes are applied
+              automatically and the layout is re-evaluated, up to the iteration
+              cap. When off (default), the LLM proposes a single change and
+              you approve or cancel it.
+            </p>
+          </div>
+        ` : nothing}
       </div>
     `;
   }
+
+  _renderVerdictCard() {
+    const verdict = this.llmVerdict;
+    const ok = !!verdict.ok;
+    const suggested = verdict.suggested_params || {};
+    const hasSuggestions = Object.keys(suggested).length > 0;
+    const iterations = this.llmIterations || 1;
+    const overlays = this.llmOverlays || [];
+    const k = this.artifactKey;
+    return html`
+      <div class="card llm-verdict-card ${ok ? "ok" : "needs-fix"}">
+        <h3>
+          ${ok
+            ? html`<span class="verdict-icon">✓</span> Layout looks good`
+            : html`<span class="verdict-icon">⚠</span> Needs adjustment`}
+          ${iterations > 1 ? html`<span class="iteration-tag">after ${iterations} iterations</span>` : nothing}
+        </h3>
+        ${overlays.length ? html`
+          <div class="verdict-overlays">
+            <p class="hint">
+              These are the overlays the LLM evaluated — your tool photo with
+              the trace polygons drawn on top at the same mm scale.
+              <span class="overlay-legend-swatch" style="border-color:#e63946">red solid</span>
+              = inner trace,
+              <span class="overlay-legend-swatch" style="border-color:#ffa600;border-style:dashed">orange dashed</span>
+              = tolerance perimeter (the line the bin will cut),
+              <span class="overlay-legend-swatch" style="border-color:#1d70b8;border-style:dotted">blue dotted</span>
+              = finger slot.
+            </p>
+            <div class="overlay-grid">
+              ${overlays.map(o => html`
+                <figure class="overlay-figure">
+                  <a href=${`${o.url}?v=${k}`} target="_blank" rel="noopener">
+                    <img src=${`${o.url}?v=${k}`} alt="Overlay for ${o.stem}">
+                  </a>
+                  <figcaption>${o.stem}</figcaption>
+                </figure>
+              `)}
+            </div>
+          </div>
+        ` : nothing}
+        <p class="verdict-reasoning">${verdict.reasoning || "(no reasoning provided)"}</p>
+        ${!ok && hasSuggestions ? html`
+          <div class="verdict-suggestions">
+            <h4>Suggested adjustments</h4>
+            <table class="diff-table">
+              ${Object.entries(suggested).map(([key, newValue]) => {
+                const oldValue = this.currentParams[key];
+                const oldDisplay = oldValue == null || oldValue === ""
+                  ? "(default)"
+                  : String(oldValue);
+                return html`
+                  <tr>
+                    <td class="diff-label">${SUGGESTED_PARAM_LABELS[key] || key}</td>
+                    <td class="diff-old">${oldDisplay}</td>
+                    <td class="diff-arrow">→</td>
+                    <td class="diff-new">${String(newValue)}</td>
+                  </tr>
+                `;
+              })}
+            </table>
+            <div class="actions">
+              <button class="primary"
+                      ?disabled=${this.llmBusy}
+                      @click=${this._onApplySuggestion}>
+                Apply &amp; re-run
+              </button>
+              <button class="secondary"
+                      @click=${() => {
+                        this.llmVerdict = null;
+                        this.llmIterations = 0;
+                        this.llmOverlays = [];
+                      }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ` : nothing}
+      </div>
+    `;
+  }
+
+  _onCheckWithLlm = async () => {
+    if (this.llmBusy) return;
+    this.llmBusy = true;
+    this.llmError = null;
+    this.llmVerdict = null;
+    this.llmIterations = 0;
+    this.llmOverlays = [];
+    try {
+      const res = await fetch(`/jobs/${this.jobId}/llm_evaluate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          auto_loop: !!this.llmAutoLoop,
+          max_iterations: this.llmMaxIterations,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      this.llmVerdict = data.verdict;
+      this.llmIterations = data.iterations || 1;
+      // Each entry: { stem: str, url: "/jobs/<id>/overlays/<stem>" }.
+      // Empty list when overlay generation failed for every tool —
+      // verdict still renders, just without the visual.
+      this.llmOverlays = Array.isArray(data.overlays) ? data.overlays : [];
+    } catch (err) {
+      this.llmError = err.message || String(err);
+    } finally {
+      this.llmBusy = false;
+    }
+  };
+
+  _onApplySuggestion = () => {
+    if (!this.llmVerdict || !this.llmVerdict.suggested_params) return;
+    const params = { ...this.llmVerdict.suggested_params };
+    if (Object.keys(params).length === 0) return;
+    const layoutOnly = !Object.keys(params).some(k => TRACE_REQUIRED_FIELDS.has(k));
+    this.dispatchEvent(new CustomEvent("redo", {
+      detail: { params, layoutOnly },
+      bubbles: true,
+      composed: true,
+    }));
+  };
 }
 
 customElements.define("pic-preview", PicPreview);

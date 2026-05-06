@@ -43,8 +43,16 @@ ARTIFACT_WHITELIST = {
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif"}
 
 
-def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
-    job_manager = JobManager(jobs_root=jobs_root, ttl_hours=ttl_hours)
+def create_app(
+    jobs_root: Path,
+    ttl_hours: float = 24.0,
+    anthropic_api_key: Optional[str] = None,
+) -> FastAPI:
+    job_manager = JobManager(
+        jobs_root=jobs_root,
+        ttl_hours=ttl_hours,
+        anthropic_api_key=anthropic_api_key,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -55,10 +63,18 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
         finally:
             cleanup_task.cancel()
             # Tell active SSE subscribers to exit so EventSourceResponse can
-            # close cleanly before uvicorn cancels their tasks. Yield once
-            # so the awaiting generators get a chance to run.
+            # close cleanly before uvicorn cancels their tasks. The flush
+            # chain — subscribe() exits → event_generator() ends →
+            # EventSourceResponse writes its closing frame → network flush —
+            # takes several event-loop ticks per active connection, so a
+            # single sleep(0) isn't enough on busy or slow machines. Yield
+            # in short bursts up to ~250 ms total, exiting early once every
+            # subscriber queue has drained.
             job_manager.signal_subscribers_shutdown()
-            await asyncio.sleep(0)
+            for _ in range(25):
+                await asyncio.sleep(0.01)
+                if not job_manager.has_active_subscribers():
+                    break
             job_manager.shutdown()
 
     app = FastAPI(title="pic-to-bin", lifespan=lifespan)
@@ -67,6 +83,31 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
     # ---- Static UI ---------------------------------------------------------
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    @app.get("/favicon.ico")
+    async def favicon() -> FileResponse:
+        # Browsers auto-request /favicon.ico even when <link rel="icon">
+        # points elsewhere. Serve the 32×32 PNG here so the request
+        # succeeds without us shipping a separate .ico file.
+        return FileResponse(
+            STATIC_DIR / "favicon-32.png", media_type="image/png"
+        )
+
+    @app.get("/.well-known/appspecific/com.chrome.devtools.json")
+    async def chrome_devtools_workspace() -> dict:
+        # Chrome DevTools' "Automatic Workspace Folders" feature probes
+        # this URL when DevTools is open against a localhost origin. A
+        # proper response auto-attaches the project source for in-browser
+        # editing. Spec:
+        # https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/ecosystem/automatic_workspace_folders.md
+        import uuid as _uuid
+        project_root = STATIC_DIR.parent.parent.parent
+        return {
+            "workspace": {
+                "root": str(project_root),
+                "uuid": str(_uuid.uuid5(_uuid.NAMESPACE_URL, str(project_root))),
+            }
+        }
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -132,13 +173,42 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
         job = job_manager.get(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        return job.to_summary()
+        summary = job.to_summary()
+        # Surface server-level capabilities alongside per-job state so the
+        # frontend can hide the LLM button when the API key isn't set,
+        # without an extra round-trip on every load.
+        summary["llm_available"] = job_manager.llm_available
+        return summary
+
+    @app.get("/config")
+    async def get_config() -> dict:
+        """Server capabilities the frontend needs at startup time."""
+        return {"llm_available": job_manager.llm_available}
 
     @app.get("/jobs/{job_id}/events")
     async def events(job_id: str, request: Request):
         job = job_manager.get(job_id)
         if job is None:
-            raise HTTPException(404, "job not found")
+            # The classic 404 here works for the initial connection but is
+            # awful when a browser tab outlives a server restart: jobs are
+            # in-memory only, so an EventSource pointing at the old job ID
+            # keeps reconnecting and hammering the new server's logs with
+            # 404s every ~3 s. Return a 200 SSE stream instead, with a
+            # `session_lost` event the frontend can recognize, plus
+            # `retry: 0` so the browser stops auto-reconnecting.
+            async def gone_stream():
+                yield {
+                    "event": "session_lost",
+                    "retry": 0,
+                    "data": json.dumps({
+                        "step": "session_lost",
+                        "message": (
+                            "Job not found on this server (it may have "
+                            "expired or the server was restarted)."
+                        ),
+                    }),
+                }
+            return EventSourceResponse(gone_stream())
 
         async def event_generator():
             async for ev in job_manager.subscribe(job):
@@ -182,6 +252,62 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
         job_manager.submit_redo(job, new_params, layout_only=layout_only)
         return {"job_id": job.id, "status": job.status.value}
 
+    @app.post("/jobs/{job_id}/llm_evaluate")
+    async def llm_evaluate(job_id: str, payload: dict) -> dict:
+        """Send the rectified photo + layout preview to Claude for a fit verdict.
+
+        Body: ``{"auto_loop": bool=False, "max_iterations": int=3}``.
+        Returns ``{"verdict": {...}, "iterations": int}`` once the
+        synchronous Anthropic call (or auto-loop sequence) finishes.
+        Progress events stream through the existing SSE channel.
+        """
+        if not job_manager.llm_available:
+            raise HTTPException(
+                503,
+                "LLM evaluation unavailable: ANTHROPIC_API_KEY is not set "
+                "on the server. Add it to a .env file at the project root "
+                "or export it before launching pic-to-bin-web.",
+            )
+        job = job_manager.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.status != JobStatus.AWAITING_DECISION:
+            raise HTTPException(
+                409,
+                f"can only evaluate from awaiting_decision "
+                f"(current: {job.status.value})",
+            )
+        auto_loop = bool(payload.get("auto_loop", False))
+        max_iterations = int(payload.get("max_iterations", 3))
+        if max_iterations < 1 or max_iterations > 10:
+            raise HTTPException(
+                400, "max_iterations must be between 1 and 10"
+            )
+
+        loop = asyncio.get_running_loop()
+        try:
+            verdict, iterations, overlay_stems = await loop.run_in_executor(
+                job_manager._executor,
+                job_manager.run_llm_evaluate,
+                job,
+                auto_loop,
+                max_iterations,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("LLM evaluation failed for job %s", job_id)
+            raise HTTPException(500, f"LLM evaluation failed: {e}") from e
+        return {
+            "verdict": verdict.to_jsonable(),
+            "iterations": iterations,
+            "overlays": [
+                {
+                    "stem": s,
+                    "url": f"/jobs/{job.id}/overlays/{s}",
+                }
+                for s in overlay_stems
+            ],
+        }
+
     @app.get("/jobs/{job_id}/artifacts/{name}")
     async def artifact(job_id: str, name: str):
         if name not in ARTIFACT_WHITELIST:
@@ -197,6 +323,37 @@ def create_app(jobs_root: Path, ttl_hours: float = 24.0) -> FastAPI:
             path,
             media_type=media_type,
             filename=download_filename(job.part_name, filename),
+        )
+
+    @app.get("/jobs/{job_id}/overlays/{stem}")
+    async def overlay(job_id: str, stem: str):
+        """Serve a per-tool overlay image (rectified photo + trace polygons).
+
+        Generated by the LLM evaluate flow; used by the frontend verdict
+        card so the human reviewer sees exactly what the model judged.
+        ``stem`` must match one of the input image stems on this job —
+        we never let the URL select an arbitrary file path.
+
+        Prefers the size-capped JPEG (``<stem>_rectified_overlay.jpg``,
+        ≤ 1 MB) the LLM was actually shown; falls back to the older
+        full-resolution PNG for jobs created before that pipeline change.
+        """
+        job = job_manager.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        valid_stems = {p.stem for p in job.input_image_paths}
+        if stem not in valid_stems:
+            raise HTTPException(404, "overlay not found")
+        stem_dir = job.output_dir / stem
+        candidates = [
+            (stem_dir / f"{stem}_rectified_overlay.jpg", "image/jpeg"),
+            (stem_dir / f"{stem}_rectified_overlay.png", "image/png"),
+        ]
+        for path, media in candidates:
+            if path.exists():
+                return FileResponse(path, media_type=media)
+        raise HTTPException(
+            404, "overlay not yet generated for this tool"
         )
 
     @app.post("/preview")
@@ -257,7 +414,18 @@ async def _periodic_sweep(job_manager: JobManager, interval_seconds: float = 180
 
 def cli() -> None:
     """Console-script entry point: ``pic-to-bin-web``."""
+    import os
+
     import uvicorn
+
+    # Pull a `.env` from the CWD before reading env vars. python-dotenv is
+    # an optional dep (only installed with the `[web]` extras) so the
+    # import is local.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
 
     parser = argparse.ArgumentParser(
         description="Run the pic-to-bin web app (FastAPI + uvicorn)."
@@ -280,10 +448,23 @@ def cli() -> None:
     jobs_root.mkdir(parents=True, exist_ok=True)
     logger.info("Jobs directory: %s", jobs_root)
 
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY") or None
+    if anthropic_api_key:
+        logger.info("LLM fit-check enabled (ANTHROPIC_API_KEY present)")
+    else:
+        logger.info(
+            "LLM fit-check disabled (set ANTHROPIC_API_KEY in env or .env "
+            "to enable)"
+        )
+
     # The factory closure captures jobs_root so the app instance is rebuilt
     # cleanly on reload.
     def factory():
-        return create_app(jobs_root, ttl_hours=args.job_ttl_hours)
+        return create_app(
+            jobs_root,
+            ttl_hours=args.job_ttl_hours,
+            anthropic_api_key=anthropic_api_key,
+        )
 
     uvicorn.run(
         factory,

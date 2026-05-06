@@ -173,10 +173,31 @@ def _apply_abs_white(body) -> bool:
 # Bin body
 # ---------------------------------------------------------------------------
 
+def _effective_bin_top_z_cm(config):
+    """Z height (cm) of the bin body's top face, accounting for the
+    deck-lowering shortcut applied when stacking lips are disabled.
+
+    With stacking lip ON, the body is built to the full gridfinity unit
+    height; the deck cut later removes a shallow recess inside the walls
+    so the lip can sit above and provide finger access around the tool.
+
+    With stacking lip OFF, the deck IS the bin top — there's no reason
+    to leave empty walls extending above the recess. We bake that into
+    the body height so the resulting print has a flat top at the deck
+    level rather than a wall sticking up around the pocket.
+    """
+    bin_d = mm(config["height_units"] * 7.0)
+    if not config.get("stacking_lip", True):
+        lowering = mm(config.get("deck_lowering_mm", 0) or 0)
+        if lowering > 0:
+            return max(bin_d - lowering, mm(1.0))
+    return bin_d
+
+
 def create_bin_body(root_comp, config):
     bin_w = mm(config["bin_width_mm"])
     bin_h = mm(config["bin_height_mm"])
-    bin_d = mm(config["height_units"] * 7.0)
+    bin_d = _effective_bin_top_z_cm(config)
 
     sketch = root_comp.sketches.add(root_comp.xYConstructionPlane)
     lines = sketch.sketchCurves.sketchLines
@@ -198,6 +219,46 @@ def create_bin_body(root_comp, config):
                  f"x{config['height_units']}")
     _apply_abs_white(body)
     return body
+
+
+def fillet_outer_corners(root_comp, config):
+    """Round the four vertical outer corners of the bin body.
+
+    Standard gridfinity bins have 4 mm corner rounding on the outside.
+    Used to be inside ``create_stacking_lip``, factored out so it runs
+    even when the stacking lip is disabled — the bin's outer corners
+    should still be rounded either way.
+    """
+    bin_w = mm(config["bin_width_mm"])
+    bin_h = mm(config["bin_height_mm"])
+    fillet_r = mm(4.0)
+    tol = 0.005
+
+    body = _find_bin_body(root_comp)
+    if body is None:
+        return
+    vert_edges = adsk.core.ObjectCollection.create()
+    for i in range(body.edges.count):
+        edge = body.edges.item(i)
+        sp = edge.startVertex.geometry
+        ep = edge.endVertex.geometry
+        if abs(sp.x - ep.x) < tol and abs(sp.y - ep.y) < tol:
+            edge_len = abs(sp.z - ep.z)
+            if edge_len < 0.1:
+                continue
+            x, y = sp.x, sp.y
+            at_corner = ((abs(x) < tol or abs(x - bin_w) < tol) and
+                         (abs(y) < tol or abs(y - bin_h) < tol))
+            if at_corner:
+                vert_edges.add(edge)
+
+    if vert_edges.count > 0:
+        fi = root_comp.features.filletFeatures.createInput()
+        fi.addConstantRadiusEdgeSet(
+            vert_edges,
+            adsk.core.ValueInput.createByReal(fillet_r),
+            True)
+        root_comp.features.filletFeatures.add(fi)
 
 
 # ---------------------------------------------------------------------------
@@ -235,30 +296,7 @@ def create_stacking_lip(root_comp, config):
         False, adsk.core.ValueInput.createByReal(lip_h))
     extrudes.add(ext_input)
 
-    body = _find_bin_body(root_comp)
-    fillet_r = mm(4.0)
-    vert_edges = adsk.core.ObjectCollection.create()
-    for i in range(body.edges.count):
-        edge = body.edges.item(i)
-        sp = edge.startVertex.geometry
-        ep = edge.endVertex.geometry
-        if abs(sp.x - ep.x) < tol and abs(sp.y - ep.y) < tol:
-            edge_len = abs(sp.z - ep.z)
-            if edge_len < 0.1:
-                continue
-            x, y = sp.x, sp.y
-            at_corner = ((abs(x) < tol or abs(x - bin_w) < tol) and
-                         (abs(y) < tol or abs(y - bin_h) < tol))
-            if at_corner:
-                vert_edges.add(edge)
-
-    if vert_edges.count > 0:
-        fi = root_comp.features.filletFeatures.createInput()
-        fi.addConstantRadiusEdgeSet(
-            vert_edges,
-            adsk.core.ValueInput.createByReal(fillet_r),
-            True)
-        root_comp.features.filletFeatures.add(fi)
+    fillet_outer_corners(root_comp, config)
 
     cl = mm(BASE_CLEARANCE_MM)
     cone_h = mm(BASE_PAD_CONE_H_MM)
@@ -379,6 +417,13 @@ def lower_deck(root_comp, config):
     lowering = config.get("deck_lowering_mm", 0)
     if not lowering or lowering <= 0:
         return
+    # When stacking lips are disabled the bin body has already been
+    # built to the deck level by ``create_bin_body`` — there's no extra
+    # material to recess. Skipping here also means the script never
+    # cuts a sketch outside the body's top face, which would leave a
+    # dangling sketch with no profile to extrude through.
+    if not config.get("stacking_lip", True):
+        return
 
     bin_w = mm(config["bin_width_mm"])
     bin_h = mm(config["bin_height_mm"])
@@ -424,16 +469,39 @@ def _top_cut_plane(root_comp, config):
     """Construction plane just above the stacking lip (or bin top if no lip).
 
     Pocket and slot cuts start here and go negative-Z so edge-reaching
-    profiles cut through the lip too.
+    profiles cut through the lip too. With stacking lip OFF, the body
+    has already been shortened to the deck level (see
+    ``_effective_bin_top_z_cm``) so this plane sits on the body's
+    actual top face rather than in empty space above where the wall
+    used to be.
     """
-    bin_d = mm(config["height_units"] * 7.0)
+    bin_top = _effective_bin_top_z_cm(config)
     lip_h = mm(LIP_HEIGHT_MM) if config.get("stacking_lip", True) else 0.0
     planes = root_comp.constructionPlanes
     plane_input = planes.createInput()
     plane_input.setByOffset(
         root_comp.xYConstructionPlane,
-        adsk.core.ValueInput.createByReal(bin_d + lip_h))
+        adsk.core.ValueInput.createByReal(bin_top + lip_h))
     return planes.add(plane_input), lip_h
+
+
+def _effective_pocket_depth_mm(tool, config):
+    """Pocket cut depth (mm) from the body's top face down to the pocket
+    floor, accounting for the deck-lowering shortcut applied when
+    stacking lips are disabled.
+
+    The config's ``pocket_depth_mm`` was computed assuming the bin runs
+    to the full gridfinity unit height (so a pocket cut from there to
+    1 mm above the bin floor). When we instead build the body to deck
+    level (stacking lip OFF), the cut starts that much lower and needs
+    a correspondingly shorter depth — otherwise the cut punches through
+    the bin floor.
+    """
+    requested = float(tool.get("pocket_depth_mm", 0.0))
+    if not config.get("stacking_lip", True):
+        lowering = float(config.get("deck_lowering_mm", 0) or 0)
+        requested = max(requested - lowering, 0.5)
+    return requested
 
 
 def cut_tool_pockets(root_comp, config):
@@ -446,7 +514,7 @@ def cut_tool_pockets(root_comp, config):
                 or tool.get("inner_polys_mm", [])
         if not polys:
             continue
-        depth_cm = mm(tool["pocket_depth_mm"]) + lip_h
+        depth_cm = mm(_effective_pocket_depth_mm(tool, config)) + lip_h
 
         sketch = root_comp.sketches.add(top_plane)
         sketch.name = f"pocket_{tool.get('name', 'tool')}"
@@ -476,7 +544,7 @@ def cut_slots(root_comp, config):
         slot_polys = tool.get("slot_polys_mm", [])
         if not slot_polys:
             continue
-        slot_depth = mm(tool["pocket_depth_mm"]) + lip_h
+        slot_depth = mm(_effective_pocket_depth_mm(tool, config)) + lip_h
 
         sketch = root_comp.sketches.add(top_plane)
         sketch.name = f"slot_{tool.get('name', 'tool')}"
@@ -705,6 +773,12 @@ def build_bin(config_path: str, ui=None) -> dict:
     if config.get("stacking_lip", True):
         _group_phase(timeline, "Stacking Lip",
                      create_stacking_lip, root_comp, config)
+    else:
+        # Stacking lip itself filets the outer corners; when it's
+        # disabled we still want them rounded (gridfinity convention),
+        # so call the fillet phase directly.
+        _group_phase(timeline, "Outer Corners",
+                     fillet_outer_corners, root_comp, config)
     _group_phase(timeline, "Deck", lower_deck, root_comp, config)
     _group_phase(timeline, "Tool Pockets",
                  cut_tool_pockets, root_comp, config)

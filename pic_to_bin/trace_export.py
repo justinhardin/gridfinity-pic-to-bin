@@ -207,6 +207,323 @@ def _axial_stretch_polygons(polygons: list[list[tuple[float, float]]],
     return out
 
 
+def _resample_polygon(polygon: list[tuple[float, float]],
+                       step: float) -> np.ndarray:
+    """Resample a closed polygon at uniform arc-length spacing.
+
+    Returns an (N, 2) float array. Used as a prerequisite for Gaussian
+    contour smoothing — the convolution kernel is a function of arc
+    length, so the input must have uniform spacing.
+    """
+    pts = np.asarray(polygon, dtype=np.float64)
+    if len(pts) < 3:
+        return pts
+    closed = np.vstack([pts, pts[:1]])
+    seg = np.diff(closed, axis=0)
+    seg_len = np.linalg.norm(seg, axis=1)
+    arc = np.concatenate([[0.0], np.cumsum(seg_len)])
+    perimeter = float(arc[-1])
+    if perimeter < 1e-9:
+        return pts
+    n = max(8, int(np.ceil(perimeter / step)))
+    targets = np.linspace(0.0, perimeter, n, endpoint=False)
+    out = np.empty((n, 2), dtype=np.float64)
+    out[:, 0] = np.interp(targets, arc, closed[:, 0])
+    out[:, 1] = np.interp(targets, arc, closed[:, 1])
+    return out
+
+
+def _smooth_polygon_coords(polygon: list[tuple[float, float]],
+                            sigma_mm: float,
+                            sigma_axial_mm: float = 0.5,
+                            resample_step_mm: float = 0.3,
+                            corner_preserve_deg: float = 60.0,
+                            convex_corner_threshold_deg: float = 30.0,
+                            ) -> list[tuple[float, float]]:
+    """Anisotropic, curvature-aware Gaussian-smooth a closed polygon.
+
+    Decomposes each point's offset from the centroid into a component along
+    the polygon's principal axis (axial) and a component perpendicular to
+    it, then smooths each component with its own sigma along arc length
+    (wrap-around so the start/end join stays seamless).
+
+    The asymmetry exists to remove wave noise on the sides of an elongated
+    tool (mostly perpendicular displacement) without shortening sharp tips
+    (which want their axial extent preserved). A second mechanism — local
+    curvature gating — blends the smoothed result back toward the original
+    at sharp corners, so brackets/braces with intentional convex
+    protrusions don't get rounded off the way reflective scissor blades
+    get smoothed.
+
+    Args:
+        sigma_mm: Perpendicular Gaussian sigma in mm. Larger = more side
+            smoothing. Set to 0 to disable.
+        sigma_axial_mm: Along-principal-axis sigma in mm. Kept small
+            (default 0.5) to preserve tip-to-tip length.
+        resample_step_mm: Uniform arc-length spacing used during the
+            convolution.
+        corner_preserve_deg: Turning-angle threshold above which a vertex
+            is treated as a "real" corner and the original position is
+            preserved. The blend uses a Gaussian falloff in the turning
+            angle so the transition is smooth, not binary.
+        convex_corner_threshold_deg: Lower threshold (default 30°) used
+            specifically to detect convex sharp corners on the original
+            input polygon for full neighborhood preservation. Set lower
+            than ``corner_preserve_deg`` because real-world tools have
+            corners that aren't always 90° (e.g. a trigger guard's
+            angle is closer to 50–60° turn) and the user-visible cost
+            of clipping a convex feature is much worse than the cost of
+            slightly under-smoothing a curve.
+
+    Falls back to the input on degenerate input (under 3 points).
+    """
+    perp_sigma = max(0.0, sigma_mm)
+    axial_sigma = max(0.0, sigma_axial_mm)
+    if (perp_sigma <= 0 and axial_sigma <= 0) or len(polygon) < 3:
+        return polygon
+
+    pts = _resample_polygon(polygon, resample_step_mm)
+    n = len(pts)
+    if n < 3:
+        return polygon
+
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+
+    # PCA: principal axis is the eigenvector with the larger eigenvalue.
+    cov = np.cov(centered.T)
+    if not np.all(np.isfinite(cov)):
+        return polygon
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    idx = int(np.argmax(eigvals))
+    principal = eigvecs[:, idx]
+    secondary = eigvecs[:, 1 - idx]
+
+    axial = centered @ principal     # (n,) signed offsets along principal axis
+    perp = centered @ secondary      # (n,) signed offsets perpendicular to it
+
+    def _smooth_1d(data: np.ndarray, sigma_mm_: float) -> np.ndarray:
+        if sigma_mm_ <= 0:
+            return data
+        sigma_samples = sigma_mm_ / resample_step_mm
+        radius = max(1, int(np.ceil(sigma_samples * 3)))
+        if radius >= n // 2:
+            radius = max(1, n // 2 - 1)
+        x = np.arange(2 * radius + 1, dtype=np.float64) - radius
+        kernel = np.exp(-0.5 * (x / sigma_samples) ** 2)
+        kernel /= kernel.sum()
+        padded = np.concatenate([data[-radius:], data, data[:radius]])
+        return np.convolve(padded, kernel, mode="valid")
+
+    axial_s = _smooth_1d(axial, axial_sigma)
+    perp_s = _smooth_1d(perp, perp_sigma)
+
+    # Per-point corner-preservation blend. Compute the turning angle
+    # twice — once on the resampled polygon (for the mild Gaussian
+    # falloff at every vertex) and once on the original input polygon
+    # (so we can detect convex sharp corners robustly).
+    #
+    # Why detect on the original: ``_resample_polygon`` interpolates
+    # linearly along arc length without preserving the input's
+    # vertices, so a single 90° corner ends up split across two or three
+    # adjacent ~45° subvertices in the resampled output. Each is below
+    # the default 60° threshold individually, so a per-resampled-vertex
+    # detector misses the corner entirely (the shape ends up rounded by
+    # the perpendicular smoothing). The original polygon, however, has
+    # the corner as one vertex with a clean 90° turn.
+    #
+    # Why convex vs concave matters: at convex (outward-pointing) sharp
+    # corners — the corner of a trigger guard, a hammer claw, etc. —
+    # smoothing pulls the polygon inward and visibly clips the feature.
+    # Concave sharp corners (inward notches) get the existing turn-angle
+    # Gaussian falloff; gentle rounding there is desirable for tool
+    # clearance.
+    if corner_preserve_deg > 0:
+        threshold_rad = np.deg2rad(corner_preserve_deg)
+
+        # --- Resampled-vertex turn angles → base smoothing weight ---
+        seg = np.diff(np.vstack([pts, pts[:1]]), axis=0)  # (n, 2)
+        seg_len = np.linalg.norm(seg, axis=1, keepdims=True)
+        seg_len = np.where(seg_len < 1e-9, 1.0, seg_len)
+        seg_unit = seg / seg_len
+        prev_unit = np.roll(seg_unit, 1, axis=0)
+        cos_turn = np.clip(
+            (prev_unit * seg_unit).sum(axis=1), -1.0, 1.0
+        )
+        turn_rad = np.arccos(cos_turn)
+        # Gaussian falloff in turn angle: weight 1 at turn=0, weight ≈0.05
+        # at turn=corner_preserve_deg, ≈0 well above.
+        smooth_weight = np.exp(-(turn_rad / threshold_rad) ** 2)
+
+        # --- Original-polygon convex-sharp detection ---
+        # Per-vertex turn angle alone can't distinguish a real tool corner
+        # from a wave-noise peak: SAM2 traces of reflective surfaces have
+        # 0.5 mm-amplitude waves with ≈3 mm wavelength, and sampled
+        # densely enough each peak hits ~90° turn at the apex vertex.
+        # The discriminator is *integrated* signed turn over a small arc-
+        # length window: a real corner concentrates its turn into one
+        # vertex with smooth shoulders, so the integral over a few mm
+        # stays close to the corner angle. A wave peak alternates with
+        # an adjacent concave valley, so the signed integral over ≥ one
+        # wavelength averages near zero.
+        orig_pts = np.asarray(polygon, dtype=np.float64)
+        if len(orig_pts) >= 3:
+            orig_seg = np.diff(np.vstack([orig_pts, orig_pts[:1]]), axis=0)
+            orig_seg_len_arr = np.linalg.norm(orig_seg, axis=1)
+            orig_seg_len_safe = np.where(
+                orig_seg_len_arr < 1e-9, 1.0, orig_seg_len_arr
+            )
+            orig_seg_unit = orig_seg / orig_seg_len_safe[:, None]
+            orig_prev_unit = np.roll(orig_seg_unit, 1, axis=0)
+            orig_cos_turn = np.clip(
+                (orig_prev_unit * orig_seg_unit).sum(axis=1), -1.0, 1.0
+            )
+            orig_turn_rad = np.arccos(orig_cos_turn)
+            orig_cross_z = (
+                orig_prev_unit[:, 0] * orig_seg_unit[:, 1]
+                - orig_prev_unit[:, 1] * orig_seg_unit[:, 0]
+            )
+            ccw_polygon = _signed_area(polygon) >= 0.0
+            orig_is_convex = (
+                (orig_cross_z > 0) if ccw_polygon else (orig_cross_z < 0)
+            )
+            convex_threshold_rad = np.deg2rad(convex_corner_threshold_deg)
+
+            # Signed turn: positive for convex (left turns on CCW), negative
+            # for concave (right turns). Integrate over a 5 mm window —
+            # wider than typical SAM2 wave wavelength (≈3 mm on
+            # reflective surfaces) so peaks and valleys within the wave
+            # cancel, narrower than tool-feature spacing so adjacent real
+            # corners don't confuse each other.
+            orig_signed_turn = np.where(
+                orig_is_convex, orig_turn_rad, -orig_turn_rad
+            )
+            arc_at_vertex = np.concatenate(
+                [[0.0], np.cumsum(orig_seg_len_arr)[:-1]]
+            )
+            perimeter = float(orig_seg_len_arr.sum())
+            window_mm = 5.0
+            half_w = window_mm / 2.0
+            # Triple-tile arc length + signed turn for wrap-around.
+            arc_3x = np.concatenate([
+                arc_at_vertex - perimeter,
+                arc_at_vertex,
+                arc_at_vertex + perimeter,
+            ])
+            turn_3x = np.tile(orig_signed_turn, 3)
+            cum_turn_3x = np.concatenate([[0.0], np.cumsum(turn_3x)])
+            integrated_turn = np.zeros(len(orig_pts))
+            for i in range(len(orig_pts)):
+                center = arc_at_vertex[i]
+                lo = int(np.searchsorted(
+                    arc_3x, center - half_w, side="left"
+                ))
+                hi = int(np.searchsorted(
+                    arc_3x, center + half_w, side="right"
+                ))
+                integrated_turn[i] = (
+                    cum_turn_3x[hi] - cum_turn_3x[lo]
+                )
+
+            # A vertex is a "real" convex sharp corner when:
+            #   - its integrated signed turn over the window is at least
+            #     the threshold (so SAM2 wave noise is filtered out), AND
+            #   - its own per-vertex turn is convex AND above the threshold
+            #     (so we have a clean local apex to anchor the preservation
+            #     zone on).
+            orig_convex_sharp_idx = np.where(
+                (integrated_turn >= convex_threshold_rad)
+                & (orig_turn_rad >= convex_threshold_rad)
+                & orig_is_convex
+            )[0]
+        else:
+            orig_convex_sharp_idx = np.array([], dtype=int)
+            orig_pts = np.empty((0, 2), dtype=np.float64)
+
+        # Map each original-polygon convex-sharp vertex onto its nearest
+        # resampled vertex, then spread that single-point indicator
+        # along arc length by the same sigma we use for the smoothing
+        # kernel — the resulting "preserve zone" exactly matches the
+        # region whose neighbors would otherwise be pulled inward by the
+        # kernel. Normalize the zone so a single isolated corner peaks
+        # at 1.0 (otherwise Gaussian-convolution normalization scales
+        # the peak down by ~1/(σ·√(2π)·samples), which would barely
+        # dent the smooth weight).
+        convex_sharp_indicator = np.zeros(n, dtype=np.float64)
+        for idx in orig_convex_sharp_idx:
+            corner_pos = orig_pts[idx]
+            d = np.linalg.norm(pts - corner_pos, axis=1)
+            convex_sharp_indicator[int(np.argmin(d))] = 1.0
+
+        if convex_sharp_indicator.any() and perp_sigma > 0:
+            # Spread the corner indicator with a sigma WIDER than the
+            # smoothing kernel itself. The smoothing kernel averages
+            # points within ~3·perp_sigma of arc length; if the zone
+            # Gaussian has the SAME sigma, neighbors still inside the
+            # smoothing reach but outside the zone's effective support
+            # get fully smoothed and pull the corner inward despite the
+            # vertex being preserved. 2.5×perp_sigma keeps the zone ≥0.5
+            # out to 3×perp_sigma, which is roughly the distance over
+            # which a sharp corner needs its neighbors held in place to
+            # actually look sharp.
+            zone_sigma = perp_sigma * 2.5
+            zone = _smooth_1d(convex_sharp_indicator, zone_sigma)
+            z_max = float(zone.max())
+            if z_max > 1e-9:
+                zone = zone / z_max
+            # Square-root the normalized zone for a flatter plateau at
+            # the corner (zone^0.5 stays close to 1 over a wider range
+            # before falling off), so the preserved region is shaped
+            # less like a single Gaussian peak and more like a held
+            # neighborhood with smooth shoulders.
+            zone = np.sqrt(np.clip(zone, 0.0, 1.0))
+            # Inside the zone, force smooth_weight toward 0 (full
+            # preservation). 1 − zone is 0 at the corner and rises back
+            # to 1 outside the smoothing kernel's reach.
+            smooth_weight = smooth_weight * (1.0 - zone)
+
+        # Blend per-component: w·smoothed + (1-w)·original
+        axial_s = smooth_weight * axial_s + (1.0 - smooth_weight) * axial
+        perp_s = smooth_weight * perp_s + (1.0 - smooth_weight) * perp
+
+    # Outward bias: ensure the smoothed polygon never shrinks below the
+    # original's outward extent in the PCA frame. For each vertex, if
+    # smoothing pulled |axial| or |perp| toward zero (i.e. toward the
+    # centroid), revert that component to the original. This guarantees
+    # the trace covers everything the input polygon covered — preventing
+    # the trace from clipping the actual tool, which was the user's
+    # primary complaint when reflective trim or curved features were
+    # being cut off by the smoothing.
+    #
+    # The trade-off: SAM2 wave noise on long edges (e.g. scissor blades)
+    # has its outward peaks preserved instead of fully averaged out, so
+    # the trace shows mild bumps where it used to be perfectly flat. In
+    # practice the bumps are sub-millimeter and the bin pocket just ends
+    # up a hair wider in those regions, which is preferable to clipping
+    # a real tool feature.
+    # Use the sign of the ORIGINAL component for the bias clamp. The
+    # smoothed component might have flipped sign (rare, only happens
+    # with aggressive smoothing across the principal axis); when that
+    # occurs we still want to preserve the original outward direction.
+    abs_axial_orig = np.abs(axial)
+    abs_perp_orig = np.abs(perp)
+    axial_s = np.where(
+        np.abs(axial_s) < abs_axial_orig,
+        np.sign(axial) * abs_axial_orig,
+        axial_s,
+    )
+    perp_s = np.where(
+        np.abs(perp_s) < abs_perp_orig,
+        np.sign(perp) * abs_perp_orig,
+        perp_s,
+    )
+
+    out = (centroid
+           + np.outer(axial_s, principal)
+           + np.outer(perp_s, secondary))
+    return [(float(x), float(y)) for x, y in out]
+
+
 def _simplify_polygon(polygon: list[tuple[float, float]],
                        epsilon: float = 0.3) -> list[tuple[float, float]]:
     """Simplify polygon using the Douglas-Peucker algorithm.
@@ -252,10 +569,25 @@ def _simplify_polygon(polygon: list[tuple[float, float]],
     return [(float(x), float(y)) for x, y in simplified]
 
 
+def _signed_area(polygon: list[tuple[float, float]]) -> float:
+    """Signed area via the shoelace formula. Positive = CCW, negative = CW."""
+    n = len(polygon)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return s * 0.5
+
+
 def _round_sharp_corners(polygon: list[tuple[float, float]],
                           radius: float = 1.5,
                           min_angle_deg: float = 90,
-                          n_arc_points: int = 8) -> list[tuple[float, float]]:
+                          n_arc_points: int = 8,
+                          concave_only: bool = True,
+                          ) -> list[tuple[float, float]]:
     """Replace sharp corners with fillet arcs.
 
     Any vertex where the interior angle is less than min_angle_deg gets
@@ -266,9 +598,21 @@ def _round_sharp_corners(polygon: list[tuple[float, float]],
         radius: Fillet radius in mm (default 1.5)
         min_angle_deg: Threshold — corners sharper than this are rounded
         n_arc_points: Number of points to generate along each fillet arc
+        concave_only: When True (default), skip convex corners. Convex
+            corners are outward protrusions; rounding them shrinks the
+            polygon and clips features (e.g. bracket corners that the
+            physical tool actually has). Concave corners are inward
+            notches; rounding those just adds clearance and helps Fusion
+            cut without sub-tool-radius inside corners.
     """
     if len(polygon) < 3:
         return polygon
+
+    # Determine winding so the convex/concave sign convention is stable.
+    # For CCW polygons, the cross product of (curr→next) × (curr→prev) is
+    # positive at convex vertices. We flip the sign for CW input so the
+    # downstream convex-detection logic stays simple.
+    ccw = _signed_area(polygon) >= 0.0
 
     result = []
     n = len(polygon)
@@ -294,6 +638,22 @@ def _round_sharp_corners(polygon: list[tuple[float, float]],
         if np.degrees(angle) >= min_angle_deg:
             result.append(polygon[i])
             continue
+
+        # Skip convex corners when concave_only is set. Cross of the
+        # incoming edge direction × outgoing edge direction: a left
+        # turn (positive cross on a CCW polygon) is a convex vertex.
+        # Sign flips for CW input.
+        #
+        # v1 = prev - curr  (toward previous vertex, opposite of incoming direction)
+        # v2 = next - curr  (already the outgoing direction, since outgoing = next - curr)
+        if concave_only:
+            e_in = -v1   # incoming edge direction = curr - prev
+            e_out = v2   # outgoing edge direction = next - curr
+            cross = float(e_in[0] * e_out[1] - e_in[1] * e_out[0])
+            is_convex = cross > 0 if ccw else cross < 0
+            if is_convex:
+                result.append(polygon[i])
+                continue
 
         # Sharp corner — compute fillet arc
         half_angle = angle / 2
@@ -542,13 +902,11 @@ def compute_finger_slot(path, scale: float, clearance_mm: float = 0.0,
     run_start, run_end = best_run
     run_mid = (run_start + run_end) // 2
 
-    # Anchor placement at the global center along the principal axis, not at
-    # the middle of the narrow band — otherwise asymmetric tools (screwdriver,
-    # wrench) end up with the slot near the end where the narrow band lives.
+    # Anchor placement at the global center along the principal axis.
     axis_center = (p_min + p_max) / 2.0
     center_idx = int(np.argmin(np.abs(positions - axis_center)))
 
-    # --- Step 4–6: Place slot, trying positions from center of handle run outward ---
+    # --- Step 4–6: Place slot, trying positions from geometric center outward ---
     bbox_tool = _compute_bbox([polygon])
     bin_w = math.ceil(bbox_tool['width_mm'] / gridfinity_unit)
     bin_h = math.ceil(bbox_tool['height_mm'] / gridfinity_unit)
@@ -570,10 +928,14 @@ def compute_finger_slot(path, scale: float, clearance_mm: float = 0.0,
     ideal_length = handle_total_w + 2 * ideal_overhang
     min_length = handle_total_w + 2 * min_overhang
 
-    # Try handle positions starting from the global tool center outward, so
-    # the slot lands as centered along the part as the narrow band allows.
+    # Search any valid slice along the principal axis, sorted by distance to
+    # the geometric midpoint. The narrow-run logic above informs slot sizing
+    # and the multi-region (pliers) detector, but we don't restrict candidate
+    # positions to the run — for tools whose only narrow region sits at one
+    # end (scissors: heart-shaped head + long blade), constraining candidates
+    # to the run forced the slot away from the tool's middle.
     candidate_indices = sorted(
-        range(run_start, run_end + 1),
+        [i for i in range(n_slices) if valid[i]],
         key=lambda i: abs(i - center_idx)
     )
 
@@ -638,62 +1000,13 @@ def _polygons_to_svg_paths(polygons: list[list[tuple[float, float]]]) -> list[st
     return svg_paths
 
 
-def _potrace_bezier_to_svg_paths(path, scale: float,
-                                  img_shape: tuple = None) -> tuple[list[str], list[tuple[float, float]]]:
-    """Convert potrace path to SVG path data strings using native Bezier curves.
-
-    Uses potrace's native curve representation (compact, accurate) rather than
-    sampling into polygon points.
-
-    The Y axis is flipped from image convention (Y-down) to CAD convention
-    (Y-up), matching _potrace_curves_to_polygons so the output orientation
-    matches the input photo in Y-up viewers.
-
-    Returns:
-        (svg_paths, all_points) where all_points is a flat list of (x, y) for bbox.
-    """
-    svg_paths = []
-    all_points = []
-
-    h_mm = img_shape[0] * scale if img_shape else 0.0
-    fy = (lambda y: h_mm - y) if img_shape else (lambda y: y)
-
-    curves = _filter_curves(path, img_shape) if img_shape else path
-    for curve in curves:
-        start_x = curve.start_point.x * scale
-        start_y = fy(curve.start_point.y * scale)
-        all_points.append((start_x, start_y))
-
-        d = f"M {start_x:.3f},{start_y:.3f}"
-
-        for segment in curve:
-            if segment.is_corner:
-                cx = segment.c.x * scale
-                cy = fy(segment.c.y * scale)
-                ex = segment.end_point.x * scale
-                ey = fy(segment.end_point.y * scale)
-                d += f" L {cx:.3f},{cy:.3f} L {ex:.3f},{ey:.3f}"
-                all_points.extend([(cx, cy), (ex, ey)])
-            else:
-                c1x = segment.c1.x * scale
-                c1y = fy(segment.c1.y * scale)
-                c2x = segment.c2.x * scale
-                c2y = fy(segment.c2.y * scale)
-                ex = segment.end_point.x * scale
-                ey = fy(segment.end_point.y * scale)
-                d += f" C {c1x:.3f},{c1y:.3f} {c2x:.3f},{c2y:.3f} {ex:.3f},{ey:.3f}"
-                all_points.extend([(c1x, c1y), (c2x, c2y), (ex, ey)])
-
-        d += " Z"
-        svg_paths.append(d)
-
-    return svg_paths, all_points
 
 
 def potrace_to_svg(path, output_path: str, scale: float,
                    clearance_mm: float = 0.0, tolerance_mm: float = 0.0,
                    img_shape: tuple = None, simplify_epsilon: float = 0.3,
-                   slot_polygon: list = None) -> dict:
+                   slot_polygon: list = None,
+                   display_smooth_sigma_mm: float = 2.5) -> dict:
     """Export potrace path to SVG, optionally with a tolerance outline.
 
     When tolerance_mm is non-zero, two outlines are written:
@@ -711,33 +1024,39 @@ def potrace_to_svg(path, output_path: str, scale: float,
         img_shape: (height, width) of source mask to filter boundary artifacts
         simplify_epsilon: Douglas-Peucker simplification threshold in mm for
                           the tolerance outline (default 0.3mm)
+        display_smooth_sigma_mm: Gaussian sigma (mm) for smoothing the inner
+                          display polygon before DP simplification, to remove
+                          SAM2 wave noise on reflective surfaces (default 1.5)
 
     Returns:
         Bounding box dict with width_mm, height_mm
     """
-    # Build inner (tool cutout) paths
+    # Build inner (tool cutout) paths. The inner trace is Gaussian-smoothed
+    # along the contour and then DP-simplified so reflective surfaces don't
+    # propagate SAM2 mask noise into a visibly wavy reference line on the
+    # printed fit-test. The cleanup pipeline's per-mask smoothing is tuned
+    # conservatively to preserve concavities (pliers handle gaps), so we
+    # smooth more aggressively here at the polygon level.
+    polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
     if clearance_mm > 0.001:
-        # Clearance offset requires polygon approximation
-        polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
-        inner_polygons = _offset_polygons(polygons, clearance_mm)
-        inner_svg_paths = _polygons_to_svg_paths(inner_polygons)
-        bbox_polygons = list(inner_polygons)
+        base_polygons = _offset_polygons(polygons, clearance_mm)
     else:
-        # No clearance — use native Bezier curves (fewer control points, accurate)
-        inner_svg_paths, all_points = _potrace_bezier_to_svg_paths(path, scale, img_shape)
-        bbox_polygons = [all_points]
+        base_polygons = polygons
 
-    # Build outer tolerance paths. Always generated (even at offset 0) so
-    # the Fusion cut consumes a Douglas-Peucker-simplified polygon — falling
-    # back to the raw potrace inner would give hundreds of points and freeze
-    # Fusion. _offset_polygons no-ops at offset 0; positive expands, negative
-    # shrinks.
-    if clearance_mm > 0.001:
-        base_polygons = inner_polygons
-    else:
-        base_polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
+    inner_polygons = [_smooth_polygon_coords(p, sigma_mm=display_smooth_sigma_mm)
+                      for p in base_polygons]
+    inner_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
+                      for p in inner_polygons]
+    inner_polygons = [_round_sharp_corners(p) for p in inner_polygons]
+    inner_svg_paths = _polygons_to_svg_paths(inner_polygons)
+    bbox_polygons = list(inner_polygons)
 
-    outer_polygons = _offset_polygons(base_polygons, tolerance_mm)
+    # Build outer tolerance paths from the smoothed inner so the dashed
+    # tolerance line stays parallel to the printed inner reference. Always
+    # generated (even at offset 0) so the Fusion cut consumes a DP-simplified
+    # polygon — falling back to raw potrace would give hundreds of points and
+    # freeze Fusion. _offset_polygons no-ops at offset 0.
+    outer_polygons = _offset_polygons(inner_polygons, tolerance_mm)
     outer_polygons = [_simplify_polygon(p, epsilon=simplify_epsilon)
                       for p in outer_polygons]
     outer_polygons = [_round_sharp_corners(p) for p in outer_polygons]
@@ -841,7 +1160,8 @@ def potrace_to_dxf(path, output_path: str, scale: float,
                    clearance_mm: float = 0.0, tolerance_mm: float = 0.0,
                    axial_tolerance_mm: float = 0.0,
                    img_shape: tuple = None, simplify_epsilon: float = 0.3,
-                   slot_polygon: list = None):
+                   slot_polygon: list = None,
+                   display_smooth_sigma_mm: float = 2.5):
     """Export potrace path to DXF format, optionally with a tolerance outline.
 
     When tolerance_mm is non-zero, the inner (tool cutout) outline stays on
@@ -861,6 +1181,9 @@ def potrace_to_dxf(path, output_path: str, scale: float,
             tapered tool tips.
         img_shape: (height, width) of source mask to filter boundary artifacts
         simplify_epsilon: Douglas-Peucker simplification threshold in mm
+        display_smooth_sigma_mm: Gaussian sigma (mm) for smoothing the inner
+            display polygon before DP simplification, to remove SAM2 wave
+            noise on reflective surfaces (default 1.5)
     """
     polygons = _potrace_curves_to_polygons(path, scale, img_shape=img_shape)
 
@@ -869,6 +1192,20 @@ def potrace_to_dxf(path, output_path: str, scale: float,
     else:
         inner_polygons = polygons
 
+    # Smooth + DP-simplify the inner trace for visual output. Reflective
+    # surfaces (polished metal blades) make SAM2 produce wavy noise on the
+    # raw potrace polygon — DP alone preserves the wave (amplitude > epsilon),
+    # so we Gaussian-smooth along the contour first. The cleanup pipeline's
+    # per-mask smoothing is tuned conservatively to preserve concavities
+    # (pliers handle gaps), so we smooth more aggressively here at the polygon
+    # level. The TOLERANCE layer below is offset from this same smoothed
+    # polygon so the dashed tolerance perimeter stays parallel to the inner.
+    display_inner = [_smooth_polygon_coords(p, sigma_mm=display_smooth_sigma_mm)
+                     for p in inner_polygons]
+    display_inner = [_simplify_polygon(p, epsilon=simplify_epsilon)
+                     for p in display_inner]
+    display_inner = [_round_sharp_corners(p) for p in display_inner]
+
     doc = ezdxf.new("R2010")
     # Set drawing units to millimeters so Fusion 360 imports at correct scale
     doc.header['$INSUNITS'] = 4  # 4 = millimeters
@@ -876,19 +1213,21 @@ def potrace_to_dxf(path, output_path: str, scale: float,
     msp = doc.modelspace()
 
     # Inner outline on default layer
-    for poly in inner_polygons:
+    for poly in display_inner:
         if len(poly) < 3:
             continue
         closed_poly = list(poly) + [poly[0]]
         msp.add_lwpolyline(closed_poly, close=True)
 
-    # Outer tolerance outline on separate layer. Always generated (even at
-    # offset 0) so prepare_bin → Fusion get a Douglas-Peucker-simplified
-    # polygon to cut against — falling back to the raw potrace inner would
-    # give hundreds of points and freeze Fusion. _offset_polygons no-ops at
-    # offset 0; positive expands the pocket, negative shrinks it.
+    # Outer tolerance outline on separate layer, offset from the smoothed
+    # `display_inner` so the cut polygon stays parallel to the printed inner
+    # reference. Always generated (even at offset 0) so prepare_bin → Fusion
+    # get a DP-simplified polygon to cut against — falling back to the raw
+    # potrace inner would give hundreds of points and freeze Fusion.
+    # _offset_polygons no-ops at offset 0; positive expands the pocket,
+    # negative shrinks it.
     doc.layers.add("TOLERANCE", color=3)  # green for visual distinction
-    outer_polygons = _offset_polygons(inner_polygons, tolerance_mm)
+    outer_polygons = _offset_polygons(display_inner, tolerance_mm)
     if abs(axial_tolerance_mm) > 0.001:
         outer_polygons = _axial_stretch_polygons(outer_polygons,
                                                  axial_tolerance_mm)

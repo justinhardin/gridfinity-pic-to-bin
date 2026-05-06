@@ -45,7 +45,7 @@ from pic_to_bin.layout_tools import layout_tools, GridSizeError
 from pic_to_bin.prepare_bin import prepare_bin
 
 
-DEFAULT_PHONE_HEIGHT_MM = 482.0
+DEFAULT_PHONE_HEIGHT_MM = 480.0
 
 # Baseline tolerance offset (mm) added to whatever the user requests before
 # the trace is offset. Empirically, prints come out too tight without it;
@@ -66,6 +66,9 @@ class ProgressEvent:
 
     step is one of: "preprocess", "trace", "layout", "bin_config", "done",
     or "error" for per-image failures that the pipeline recovered from.
+    `extra` carries event-specific structured payloads — e.g. an LLM
+    verdict on the layout — that the frontend can read off the SSE
+    stream without us bolting more typed fields onto every event.
     """
     step: str
     message: str = ""
@@ -73,6 +76,7 @@ class ProgressEvent:
     image_index: Optional[int] = None
     image_total: Optional[int] = None
     image_name: Optional[str] = None
+    extra: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,7 +98,7 @@ def run_pipeline(
     paper_size: str = "legal",
     tolerance: float = 0.0,
     axial_tolerance: float = 1.0,
-    phone_height: float = DEFAULT_PHONE_HEIGHT_MM,
+    phone_height: Optional[float] = None,
     tool_taper: str = "top",
     gap: float = 3.0,
     bin_margin: float = 0.0,
@@ -107,6 +111,7 @@ def run_pipeline(
     max_refine_iterations: int = 5,
     max_concavity_depth: float = 3.0,
     mask_erode: float = 0.0,
+    display_smooth_sigma: float = 2.5,
     sam_model: str = "sam2.1_l.pt",
     skip_trace: bool = False,
     stop_after: StopAfter = "all",
@@ -186,6 +191,49 @@ def run_pipeline(
                 print(f"  Phone mode: {pp['markers_detected']}/8 markers, "
                       f"effective DPI: {dpi}")
 
+                # Resolve effective phone height for parallax compensation:
+                # explicit user override wins; otherwise prefer the per-photo
+                # EXIF-derived camera height; otherwise fall back to the
+                # baked-in default. Per-photo because different shots in one
+                # job can be taken at different heights. Emit a progress
+                # event so the user sees what was used in the on-screen log.
+                exif_focal = pp.get("exif_focal_length_35mm")
+                exif_height = pp.get("camera_height_mm")
+                if phone_height is not None:
+                    effective_phone_height = phone_height
+                    parallax_source = f"user override ({phone_height:.0f} mm)"
+                elif exif_height:
+                    effective_phone_height = float(exif_height)
+                    parallax_source = (
+                        f"auto from EXIF (focal {exif_focal:.0f} mm 35mm-equiv "
+                        f"→ camera {effective_phone_height:.0f} mm above paper)"
+                    )
+                else:
+                    effective_phone_height = DEFAULT_PHONE_HEIGHT_MM
+                    if exif_focal:
+                        # Focal length present but solvePnP rejected the
+                        # estimate (e.g. cropped photo, implausible result).
+                        parallax_source = (
+                            f"fallback {DEFAULT_PHONE_HEIGHT_MM:.0f} mm "
+                            f"(EXIF focal {exif_focal:.0f} mm but "
+                            f"camera-height estimate was implausible)"
+                        )
+                    else:
+                        parallax_source = (
+                            f"fallback {DEFAULT_PHONE_HEIGHT_MM:.0f} mm "
+                            f"(no EXIF focal length)"
+                        )
+                _emit(ProgressEvent(
+                    step="parallax",
+                    message=f"Parallax: {parallax_source}",
+                    image_index=idx, image_total=n, image_name=img.name,
+                    extra={
+                        "exif_focal_length_35mm": exif_focal,
+                        "camera_height_mm_detected": exif_height,
+                        "phone_height_mm_used": effective_phone_height,
+                    },
+                ))
+
                 # Trace
                 print(f"\n--- Tracing {img.name} ---")
                 _emit(ProgressEvent(
@@ -207,9 +255,10 @@ def run_pipeline(
                     sam_model=sam_model,
                     mask_erode_mm=mask_erode,
                     tool_height_mm=tool_height_mm,
-                    phone_height_mm=phone_height,
+                    phone_height_mm=effective_phone_height,
                     tool_taper=tool_taper,
                     finger_slots=slots,
+                    display_smooth_sigma_mm=display_smooth_sigma,
                 )
                 dxf_paths.append(result["dxf_path"])
                 iters = result.get("refinement_iterations", 1)
@@ -397,11 +446,12 @@ examples:
              "tips. Set to 0 for fully uniform tolerance.")
     parser.add_argument(
         "--phone-height", type=float, default=None,
-        help="Phone camera height above the template in mm (default: 482). "
-             "Used to compensate parallax: a tool sitting above the paper "
-             "appears larger in the photo than it really is, by a factor of "
-             "phone_height / (phone_height - tool_height/2). Lower values "
-             "apply more compensation; 0 disables compensation.")
+        help=f"Phone camera height above the template in mm "
+             f"(default: {DEFAULT_PHONE_HEIGHT_MM:.0f}). Used to compensate "
+             f"parallax: a tool sitting above the paper appears larger in the "
+             f"photo than it really is, by a factor of phone_height / "
+             f"(phone_height - tool_height/2). Lower values apply more "
+             f"compensation; 0 disables compensation.")
     parser.add_argument(
         "--tool-taper", choices=["top", "uniform", "bottom"], default="top",
         help="Tool's side profile, used to pick the right z for parallax "
@@ -465,6 +515,17 @@ examples:
              "that bleeds into the mask. 0.3-0.5 mm is a reasonable starting "
              "value when needed.")
     parser.add_argument(
+        "--display-smooth-sigma", type=float, default=2.5,
+        help="Gaussian sigma (mm) used to smooth the inner display polygon "
+             "and tolerance perimeter perpendicular to the tool's principal "
+             "axis (default: 2.5). Higher = more aggressive smoothing of "
+             "SAM2 noise on reflective surfaces (polished metal blades). "
+             "Lower (or 0 to disable) preserves sharp features on irregular "
+             "tools — e.g. brackets/braces with intentional convex corners. "
+             "Sharp corners are protected by curvature-aware blending "
+             "regardless of this value, but high values still soften "
+             "moderately curved features.")
+    parser.add_argument(
         "--sam-model", type=str, default="sam2.1_l.pt",
         help="SAM2 model weights (default: sam2.1_l.pt)")
     parser.add_argument(
@@ -473,16 +534,10 @@ examples:
 
     args = parser.parse_args()
 
-    # Confirm parallax-compensation default if --phone-height was omitted.
-    if args.phone_height is None:
-        response = input(
-            f"You haven't specified --phone-height. "
-            f"Is the default of {DEFAULT_PHONE_HEIGHT_MM:.0f} mm ok? [y/N] "
-        )
-        if response.strip().lower() != "y":
-            print("Aborted. Re-run with --phone-height <mm> to specify.")
-            sys.exit(1)
-        args.phone_height = DEFAULT_PHONE_HEIGHT_MM
+    # `args.phone_height is None` (no --phone-height passed) is intentional:
+    # it activates the EXIF auto-detect path inside run_pipeline, which
+    # falls back to DEFAULT_PHONE_HEIGHT_MM per-photo if the EXIF tag is
+    # missing or the result is implausible.
 
     output_dir = Path(args.output_dir)
 
@@ -518,6 +573,7 @@ examples:
         max_refine_iterations=args.max_refine_iterations,
         max_concavity_depth=args.max_concavity_depth,
         mask_erode=args.mask_erode,
+        display_smooth_sigma=args.display_smooth_sigma,
         sam_model=args.sam_model,
         skip_trace=args.skip_trace,
     )

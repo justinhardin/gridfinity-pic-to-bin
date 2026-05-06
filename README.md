@@ -116,7 +116,7 @@ optional:
   --axial-tolerance MM            Extra clearance only along the tool's
                                   principal axis (default: 1.0). Compensates
                                   for SAM2 under-detection at tapered tips.
-  --phone-height MM               Camera height above template, mm (default: 482).
+  --phone-height MM               Camera height above template, mm (default: 480).
                                   Drives the parallax-compensation scale-down.
   --gap MM                        Minimum gap between tools in layout, mm (default: 3.0)
   --bin-margin MM                 Extra clearance from tool extent to bin wall (default: 0)
