@@ -114,6 +114,41 @@ def test_phase_a_runs_pipeline_and_advances_status(mgr, fake_pipeline):
     assert job.layout_result["grid_units_x"] == 3
 
 
+def test_phase_a_writes_per_job_log_file(mgr, monkeypatch):
+    """Pipeline ``print()`` output during Phase A is captured into
+    ``<job_dir>/job.log`` instead of falling out to the server console."""
+    sentinel = "PIPELINE-LOG-SENTINEL-12345"
+
+    def fake(image_paths, *, output_dir, progress_cb=None, **kwargs):
+        # The fake stands in for run_pipeline; whatever it prints should
+        # land in the per-job log because JobManager's log capture wraps
+        # the call.
+        print(sentinel)
+        if progress_cb is not None:
+            progress_cb(ProgressEvent(step="layout_ready", fraction=1.0))
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            "dxf_paths": [], "combined_dxf": None, "layout_preview": None,
+            "layout_result": {"grid_units_x": 1, "grid_units_y": 1},
+            "grid_units_x": 1, "grid_units_y": 1, "bin_config": None,
+        }
+
+    monkeypatch.setattr("pic_to_bin.web.jobs.run_pipeline", fake)
+    job = mgr.create_job(
+        params={"tool_heights": 17.0},
+        input_files=[("x.png", b"X")],
+    )
+    mgr.submit_phase_a(job)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION)
+
+    log_path = job.output_dir / "job.log"
+    assert log_path.exists(), "JobManager should write per-job log file"
+    contents = log_path.read_text(encoding="utf-8")
+    assert sentinel in contents, (
+        f"pipeline stdout not captured into job.log; got: {contents!r}"
+    )
+
+
 def test_phase_b_produces_bin_config(mgr, fake_pipeline):
     job = mgr.create_job(
         params={"tool_heights": 17.0},
@@ -152,6 +187,123 @@ def test_redo_layout_only_uses_skip_trace(mgr, fake_pipeline):
     assert fake_pipeline[1]["skip_trace"] is True
     assert fake_pipeline[1]["kwargs"]["gap"] == 5.0
     assert job.params["gap"] == 5.0
+
+
+def test_run_llm_evaluate_returns_overlay_stems(mgr, fake_pipeline, monkeypatch, tmp_path):
+    """End-to-end through run_llm_evaluate: stub the Anthropic call and
+    overlay generator, verify the returned ``overlay_stems`` list lines
+    up with the input-image stems for which an overlay was written."""
+
+    # Bring the manager into the LLM-enabled state.
+    mgr.anthropic_api_key = "sk-fake"
+
+    job = mgr.create_job(
+        params={"tool_heights": 17.0},
+        input_files=[("img_a.png", b"X"), ("img_b.png", b"Y")],
+    )
+    mgr.submit_phase_a(job)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION)
+
+    # The fake pipeline doesn't create per-tool subdirs or rectified images.
+    # Materialize them so _rectified_paths_for() finds them, plus a stub
+    # trace DXF (overlay generator skips when missing). Real PNG bytes —
+    # ``cap_image_size_to_jpeg`` re-saves the overlay through PIL, which
+    # rejects header-only stubs.
+    from PIL import Image as _Image
+    for stem in ("img_a", "img_b"):
+        sub = job.output_dir / stem
+        sub.mkdir(parents=True, exist_ok=True)
+        _Image.new("RGB", (10, 10), color="white").save(
+            sub / f"{stem}_rectified.png"
+        )
+        (sub / f"{stem}_rectified_trace.dxf").write_text("0\nSECTION\n")
+
+    # Mock the LLM evaluator and overlay generator inside the import paths
+    # used by run_llm_evaluate.
+    from pic_to_bin.web import llm_check as _llm_check
+    from pic_to_bin.web import overlay as _overlay
+
+    def fake_evaluate_layout(rectified_paths, layout_preview_path,
+                              current_params, api_key, **kwargs):
+        return _llm_check.LLMVerdict(
+            ok=False,
+            reasoning="Tip looks short.",
+            suggested_params={"axial_tolerance": 1.5},
+            model="stub",
+        )
+
+    def fake_generate_overlay_image(rectified_path, trace_dxf_path,
+                                      output_path, dpi=None):
+        # Real PNG so cap_image_size_to_jpeg can read it.
+        _Image.new("RGB", (10, 10), color="red").save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(_llm_check, "evaluate_layout", fake_evaluate_layout)
+    monkeypatch.setattr(_overlay, "generate_overlay_image",
+                        fake_generate_overlay_image)
+
+    verdict, iterations, overlay_stems = mgr.run_llm_evaluate(
+        job, auto_loop=False, max_iterations=1
+    )
+
+    assert verdict.ok is False
+    assert iterations == 1
+    assert sorted(overlay_stems) == ["img_a", "img_b"]
+    # The capped JPEG (≤1 MB; what gets sent to the LLM) is what we expose
+    # through the /overlays/{stem} endpoint.
+    assert (job.output_dir / "img_a" / "img_a_rectified_overlay.jpg").exists()
+    assert (job.output_dir / "img_b" / "img_b_rectified_overlay.jpg").exists()
+
+
+def test_run_llm_evaluate_overlay_failure_falls_back(mgr, fake_pipeline,
+                                                      monkeypatch):
+    """When the overlay generator raises for one tool, the LLM eval still
+    completes and the failed stem is omitted from overlay_stems."""
+    mgr.anthropic_api_key = "sk-fake"
+    job = mgr.create_job(
+        params={"tool_heights": 17.0},
+        input_files=[("good.png", b"X"), ("bad.png", b"Y")],
+    )
+    mgr.submit_phase_a(job)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION)
+
+    from PIL import Image as _Image
+    for stem in ("good", "bad"):
+        sub = job.output_dir / stem
+        sub.mkdir(parents=True, exist_ok=True)
+        _Image.new("RGB", (10, 10), color="white").save(
+            sub / f"{stem}_rectified.png"
+        )
+        (sub / f"{stem}_rectified_trace.dxf").write_text("0\nSECTION\n")
+
+    from pic_to_bin.web import llm_check as _llm_check
+    from pic_to_bin.web import overlay as _overlay
+
+    def fake_evaluate_layout(**kwargs):
+        return _llm_check.LLMVerdict(ok=True, reasoning="fine",
+                                      suggested_params={}, model="stub")
+
+    def flaky_overlay(rectified_path, trace_dxf_path, output_path, dpi=None):
+        if "bad" in str(rectified_path):
+            raise RuntimeError("simulated overlay failure")
+        _Image.new("RGB", (10, 10), color="green").save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(_llm_check, "evaluate_layout", fake_evaluate_layout)
+    monkeypatch.setattr(_overlay, "generate_overlay_image", flaky_overlay)
+
+    verdict, iterations, overlay_stems = mgr.run_llm_evaluate(
+        job, auto_loop=False, max_iterations=1
+    )
+    assert verdict.ok is True
+    assert overlay_stems == ["good"], (
+        f"expected only successfully-overlaid 'good' stem, got {overlay_stems}"
+    )
+    # SSE event log should record the overlay failure for "bad".
+    assert any(
+        ev["step"] == "llm_overlay_failed" and "bad" in ev["message"]
+        for ev in job.event_log
+    )
 
 
 def test_pipeline_error_marks_job_error(mgr, monkeypatch):

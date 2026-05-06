@@ -34,6 +34,14 @@ build/
 .venv/
 venv/
 *.tmp.*
+*.log
+
+# Secrets — Anthropic API key etc., loaded by python-dotenv at startup
+.env
+
+# Local scratch dirs from before/after smoothing experiments etc.
+corner_comparison/
+retrace_test/
 
 # Claude Code session
 .claude/

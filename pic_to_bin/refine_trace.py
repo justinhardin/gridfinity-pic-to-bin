@@ -284,6 +284,7 @@ def refine_trace(
     phone_height_mm: float = 0.0,
     tool_taper: str = "top",
     finger_slots: bool = True,
+    display_smooth_sigma_mm: float = 2.5,
 ) -> dict:
     """Run trace_tool iteratively, adjusting cleanup params to preserve concavities.
 
@@ -393,6 +394,7 @@ def refine_trace(
         phone_height_mm=phone_height_mm,
         tool_taper=tool_taper,
         finger_slots=finger_slots,
+        display_smooth_sigma_mm=display_smooth_sigma_mm,
         **params.to_dict(),
     )
 

@@ -649,7 +649,10 @@ def cleanup_mask(mask: np.ndarray, dpi: float,
     return mask
 
 
-def straighten_mask(mask: np.ndarray, angle_threshold: float = 45.0) -> np.ndarray:
+def straighten_mask(
+    mask: np.ndarray,
+    angle_threshold: float = 45.0,
+) -> tuple[np.ndarray, dict]:
     """Auto-straighten a tool mask by snapping the principal axis to 0° or 90°.
 
     Uses PCA on the largest contour to find the dominant orientation, computes
@@ -663,14 +666,26 @@ def straighten_mask(mask: np.ndarray, angle_threshold: float = 45.0) -> np.ndarr
             largest possible snap-to-90° correction).
 
     Returns:
-        Straightened binary mask (may be larger than input to avoid clipping)
+        ``(rotated_mask, transform_info)``. ``transform_info`` is a dict
+        suitable for JSON serialization that lets a downstream consumer
+        (e.g. the LLM-overlay renderer) undo the rotation: it always
+        includes ``"applied"`` (bool) and the original/new mask shapes,
+        and when applied also ``"correction_deg"``. ``applied=False``
+        means the returned mask is the input unchanged.
     """
+    h_orig, w_orig = mask.shape[:2]
+    info_unchanged = {
+        "applied": False,
+        "original_shape": [int(h_orig), int(w_orig)],
+        "new_shape": [int(h_orig), int(w_orig)],
+        "correction_deg": 0.0,
+    }
     if angle_threshold <= 0:
-        return mask
+        return mask, info_unchanged
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        return mask
+        return mask, info_unchanged
 
     largest = max(contours, key=cv2.contourArea)
     pts = largest.squeeze(1).astype(np.float64)  # (N, 2)
@@ -694,7 +709,7 @@ def straighten_mask(mask: np.ndarray, angle_threshold: float = 45.0) -> np.ndarr
         if abs(correction) >= 0.5:
             print(f"  Straighten: skipped ({correction:+.1f}° exceeds "
                   f"{angle_threshold}° threshold)")
-        return mask
+        return mask, info_unchanged
 
     # Rotate the mask, expanding the canvas so nothing is clipped
     h, w = mask.shape[:2]
@@ -715,7 +730,13 @@ def straighten_mask(mask: np.ndarray, angle_threshold: float = 45.0) -> np.ndarr
 
     print(f"  Straightened: {correction:+.1f}° correction "
           f"(principal axis was {angle:.1f}° from horizontal)")
-    return rotated
+    info = {
+        "applied": True,
+        "correction_deg": float(correction),
+        "original_shape": [int(h), int(w)],
+        "new_shape": [int(new_h), int(new_w)],
+    }
+    return rotated, info
 
 
 def vectorize_mask(mask: np.ndarray, alphamax: float = 1.2,
@@ -778,6 +799,7 @@ def trace_from_mask(
     phone_height_mm: float = 0.0,
     tool_taper: str = "top",
     finger_slots: bool = True,
+    display_smooth_sigma_mm: float = 2.5,
 ) -> dict:
     """Run cleanup → straighten → vectorize → export on a pre-segmented mask.
 
@@ -816,16 +838,21 @@ def trace_from_mask(
     #
     # Which z to use depends on the tool's profile (tool_taper):
     #
-    #   "top"     — tool widens going up (screwdrivers, pliers, hammers,
-    #               wrenches with flared handles). The top face occludes
-    #               the bottom edge, so the visible silhouette tracks z =
-    #               tool_height_mm. Shrink fully.
-    #   "uniform" — vertical sides (boxy multimeters, batteries, USB drives).
-    #               Top and bottom outlines are identical, but the top face
-    #               is closer to the camera and thus projects larger; the
-    #               silhouette is the top face projection. Shrink fully —
-    #               same factor as "top".
-    #   "bottom"  — tool tapers inward going up (Zircon stud finder, mouse,
+    #   "top" / "uniform" — widens going up or has vertical sides
+    #               (screwdrivers, pliers, multimeters, USB drives). A
+    #               purely overhead pinhole shot would peg z at the top
+    #               edge of the silhouette (z = tool_height_mm), since
+    #               the top face is closer to the camera and dominates
+    #               the projected outline. In practice phone shots have
+    #               tilt + lens distortion + tools whose widest feature
+    #               sits mid-height (a screwdriver's flared grip lives
+    #               around the handle midline, not its very top). The
+    #               effective silhouette plane lands closer to mid-tool,
+    #               so we use z = tool_height_mm / 2. This roughly halves
+    #               the shrink versus the naive top-edge model and was
+    #               calibrated against printed fit tests across the
+    #               10-100 mm tool-height range.
+    #   "bottom"  — tapers inward going up (Zircon stud finder, mouse,
     #               anything with a wide base and a narrower top). The
     #               bottom outline is wider than the projected top, so the
     #               visible silhouette tracks z = 0. No shrink.
@@ -833,17 +860,18 @@ def trace_from_mask(
     # Defaults to "top" because the original target tools (screwdrivers /
     # pliers / wrenches) all fall in that bucket and that was the only
     # behavior before this option existed.
+    parallax_factor = 1.0
     if phone_height_mm > 0 and tool_height_mm > 0:
         if tool_taper == "bottom":
             z = 0.0
         else:  # "top" or "uniform"
-            z = tool_height_mm
+            z = tool_height_mm / 2.0
         if 0 < z < phone_height_mm:
             parallax_factor = (phone_height_mm - z) / phone_height_mm
             scale *= parallax_factor
             print(f"  Parallax compensation: phone={phone_height_mm:.0f}mm, "
                   f"tool={tool_height_mm:.1f}mm, taper={tool_taper}, "
-                  f"factor={parallax_factor:.4f} "
+                  f"z={z:.1f}mm, factor={parallax_factor:.4f} "
                   f"({(1 - parallax_factor) * 100:.1f}% shrink)")
         else:
             print(f"  Parallax compensation: skipped "
@@ -863,15 +891,40 @@ def trace_from_mask(
                         contour_smooth_sigma_mm=contour_smooth_sigma_mm,
                         notch_fill_mm=notch_fill_mm)
 
-    # Auto-straighten
+    # Auto-straighten. The transform info is persisted next to the trace
+    # DXF so consumers in the rectified-photo coordinate system (e.g. the
+    # LLM overlay) can invert the rotation when projecting trace polygons
+    # back onto the original photo.
+    h_pre_straighten, w_pre_straighten = mask.shape[:2]
     if straighten_threshold > 0:
         print("  Auto-straighten...")
-        mask = straighten_mask(mask, angle_threshold=straighten_threshold)
+        mask, straighten_info = straighten_mask(
+            mask, angle_threshold=straighten_threshold
+        )
+    else:
+        straighten_info = {
+            "applied": False,
+            "correction_deg": 0.0,
+            "original_shape": [int(h_pre_straighten), int(w_pre_straighten)],
+            "new_shape": [int(h_pre_straighten), int(w_pre_straighten)],
+        }
 
     # Save mask
     mask_path = output_dir / f"{stem}_mask.png"
     cv2.imwrite(str(mask_path), mask)
     print(f"  Saved mask: {mask_path}")
+
+    # Persist transforms applied during tracing alongside the artifacts so
+    # the overlay renderer can invert them. `parallax_factor` < 1 means the
+    # exported polygon mm coordinates are shrunken relative to the photo
+    # (the trace uses real-world dimensions, but the photo captures the
+    # parallax-inflated tool); the overlay scales the polygon back up by
+    # 1 / parallax_factor when drawing on the rectified photo.
+    straighten_info["parallax_factor"] = float(parallax_factor)
+    import json as _json
+    straighten_path = output_dir / f"{stem}_trace_straighten.json"
+    straighten_path.write_text(_json.dumps(straighten_info, indent=2),
+                                 encoding="utf-8")
 
     # Vectorize
     print("  Vectorization (potrace)...")
@@ -892,7 +945,8 @@ def trace_from_mask(
     svg_path = output_dir / f"{stem}_trace.svg"
     bbox = potrace_to_svg(path, str(svg_path), scale=scale,
                           clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
-                          img_shape=mask.shape, slot_polygon=slot_polygon)
+                          img_shape=mask.shape, slot_polygon=slot_polygon,
+                          display_smooth_sigma_mm=display_smooth_sigma_mm)
     print(f"  Saved SVG: {svg_path}")
     print(f"  Bounding box: {bbox['width_mm']:.1f} x {bbox['height_mm']:.1f} mm")
 
@@ -902,7 +956,8 @@ def trace_from_mask(
     potrace_to_dxf(path, str(dxf_path), scale=scale,
                    clearance_mm=clearance_mm, tolerance_mm=tolerance_mm,
                    axial_tolerance_mm=axial_tolerance_mm,
-                   img_shape=mask.shape, slot_polygon=slot_polygon)
+                   img_shape=mask.shape, slot_polygon=slot_polygon,
+                   display_smooth_sigma_mm=display_smooth_sigma_mm)
     print(f"  Saved DXF: {dxf_path}")
 
     print(f"  Done! Tool dimensions: {bbox['width_mm']:.1f} x {bbox['height_mm']:.1f} mm")

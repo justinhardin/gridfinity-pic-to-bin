@@ -12,6 +12,7 @@ CLI:
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -38,6 +39,10 @@ def convert_heic_to_png(image_path: str | Path) -> Path:
     If the file is not HEIC/HEIF, returns the original path unchanged.
     The PNG is saved alongside the original with the same stem.
 
+    EXIF metadata (FocalLengthIn35mmFilm in particular, which we use for
+    parallax auto-calibration) is preserved on the output PNG. Most viewers
+    don't surface PNG EXIF, but PIL reads it back fine.
+
     Args:
         image_path: Path to the image file
 
@@ -56,9 +61,172 @@ def convert_heic_to_png(image_path: str | Path) -> Path:
     png_path = image_path.with_suffix(".png")
     print(f"  Converting {image_path.name} -> {png_path.name}")
     img = Image.open(image_path)
-    img.save(png_path)
+    exif_bytes = img.info.get("exif")
+    save_kwargs = {}
+    if exif_bytes:
+        save_kwargs["exif"] = exif_bytes
+    img.save(png_path, **save_kwargs)
 
     return png_path
+
+
+# ---------------------------------------------------------------------------
+# EXIF-driven camera-height estimation
+# ---------------------------------------------------------------------------
+#
+# A photo of a planar marker grid is fundamentally scale-degenerate: without
+# knowing the camera's focal length, you cannot recover absolute distance to
+# the plane (any focal length / distance pair that preserves f/D produces the
+# same image). EXIF gives us that focal length when present.
+#
+# The relevant EXIF tag is FocalLengthIn35mmFilm (0xA405), which expresses
+# the lens's field of view as if it were on a 35 mm full-frame sensor
+# (36 mm × 24 mm). Pixel focal length recovers as
+#
+#     f_px = (focal_35mm / 36 mm) × image_width_px
+#
+# Once we have f_px we build a pinhole K, run solvePnP against the marker
+# correspondences, and read the camera height off the recovered translation.
+# Without EXIF — JPGs that have been re-exported, screenshots, etc. — we
+# fall back to whatever the user (or DEFAULT_PHONE_HEIGHT_MM) provided.
+
+# Standard EXIF tag IDs (from the Exif specification).
+_EXIF_TAG_FOCAL_LENGTH_35MM = 0xA405  # FocalLengthIn35mmFilm — integer mm
+_EXIF_IFD_TAG = 0x8769                # ExifIFD pointer (where most lens tags live)
+
+# Diagonal of a 35mm full-frame sensor (36 × 24 mm). FocalLengthIn35mmFilm
+# is defined to match the *diagonal* field of view of a 35mm full-frame
+# camera, so the conversion from f_35 to a pixel focal length scales with
+# the image diagonal — not the width or height — and is invariant to the
+# actual sensor's aspect ratio (4:3 phones, 3:2 DSLRs, etc.).
+_FULL_FRAME_DIAG_MM = (36.0 ** 2 + 24.0 ** 2) ** 0.5  # ≈ 43.267 mm
+
+
+def read_focal_length_35mm(image_path: str | Path) -> Optional[float]:
+    """Return the photo's 35 mm-equivalent focal length, or None if unset.
+
+    Reads the original file's EXIF (HEIC, JPEG, or PNG with eXIf chunk).
+    Returns ``float`` mm, e.g. ``26.0`` for an iPhone main wide shot.
+    """
+    image_path = Path(image_path)
+    try:
+        from PIL import Image
+        if image_path.suffix.lower() in HEIC_EXTENSIONS:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        with Image.open(image_path) as im:
+            exif = im.getexif()
+            if not exif:
+                return None
+            ifd = exif.get_ifd(_EXIF_IFD_TAG) if hasattr(exif, "get_ifd") else {}
+            value = ifd.get(_EXIF_TAG_FOCAL_LENGTH_35MM)
+            if value is None:
+                value = exif.get(_EXIF_TAG_FOCAL_LENGTH_35MM)
+            if value is None:
+                return None
+            return float(value)
+    except Exception:
+        return None
+
+
+def estimate_camera_height_mm(
+    ids: np.ndarray,
+    corners: list[np.ndarray],
+    paper_size: str,
+    image_shape,
+    focal_35mm: float,
+) -> Optional[float]:
+    """Estimate camera height above the paper from EXIF focal length + markers.
+
+    Uses solvePnP with a pinhole K built from ``focal_35mm`` and the photo's
+    pixel dimensions. Returns the camera's perpendicular distance from the
+    marker plane in mm, or ``None`` if the result is implausible (suggesting
+    the photo was cropped, the focal length tag was wrong, or solvePnP
+    failed).
+
+    Args:
+        ids: Detected marker IDs, shape (N, 1) — same as detect_markers().
+        corners: Per-marker (1, 4, 2) pixel-corner arrays.
+        paper_size: Template paper size (matches compute_homography).
+        image_shape: Original photo shape (h, w, ...) — pre-rectification.
+        focal_35mm: 35 mm-equivalent focal length from EXIF.
+    """
+    flat_ids = ids.flatten().tolist()
+    marker_positions = {m[0]: (m[1], m[2])
+                        for m in get_marker_positions(paper_size)}
+
+    obj_pts: list[list[float]] = []
+    img_pts: list[list[float]] = []
+    for i, mid in enumerate(flat_ids):
+        if mid not in marker_positions:
+            continue
+        cx_mm, cy_mm = marker_positions[mid]
+        mm_corners = _marker_corner_mm(cx_mm, cy_mm, MARKER_SIZE_MM)
+        px_corners = corners[i].reshape(4, 2)
+        for j in range(4):
+            obj_pts.append([float(mm_corners[j, 0]), float(mm_corners[j, 1]), 0.0])
+            img_pts.append([float(px_corners[j, 0]), float(px_corners[j, 1])])
+
+    if len(obj_pts) < 4:
+        return None
+
+    obj_arr = np.array(obj_pts, dtype=np.float64)
+    img_arr = np.array(img_pts, dtype=np.float64)
+
+    h, w = image_shape[:2]
+    # Pixel focal length from the 35mm-equivalent value: scale by the image
+    # diagonal vs. the 35mm full-frame diagonal (43.27 mm). This works
+    # regardless of orientation (portrait/landscape) and aspect ratio
+    # (4:3 phone vs 3:2 DSLR) — using w/36 instead would under-estimate
+    # f_px by ~50% on a portrait phone shot, since the photo's narrow
+    # dimension corresponds to the sensor's short edge, not the 36 mm long
+    # edge of a 35mm full-frame.
+    image_diag = (float(w) ** 2 + float(h) ** 2) ** 0.5
+    f_px = float(focal_35mm) * image_diag / _FULL_FRAME_DIAG_MM
+    K = np.array([
+        [f_px, 0.0,   w / 2.0],
+        [0.0,  f_px,  h / 2.0],
+        [0.0,  0.0,   1.0],
+    ], dtype=np.float64)
+    dist = np.zeros(5, dtype=np.float64)
+
+    # Planar-scene PnP is two-fold ambiguous: rotating the camera 180° about
+    # an axis in the plane gives the same projection. solvePnPGeneric+IPPE
+    # returns both candidates with their reprojection errors; the
+    # geometrically valid one has near-zero error (one of the two reprojects
+    # the points exactly), so we just pick that. Plain cv2.solvePnP often
+    # returns the mirrored solution.
+    #
+    # tvec[2] is the depth of the world origin in camera coordinates. For a
+    # camera that's roughly perpendicular to the marker plane (typical
+    # phone-overhead shots), this equals the camera-to-plane perpendicular
+    # distance — exactly what we want as ``phone_height``. Mild tilt
+    # (≤30°) inflates this by 1/cos(tilt) which is ≤15%; well within the
+    # other sources of error in this estimate.
+    try:
+        n, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+            obj_arr, img_arr, K, dist, flags=cv2.SOLVEPNP_IPPE,
+        )
+    except cv2.error:
+        return None
+    if not n:
+        return None
+
+    # Pick the lowest-error candidate.
+    best_idx = 0
+    if errs is not None and len(errs) > 1:
+        flat_errs = [float(e[0]) if hasattr(e, "__len__") else float(e) for e in errs]
+        best_idx = int(np.argmin(flat_errs))
+    height_mm = float(abs(tvecs[best_idx][2, 0]))
+
+    # Plausibility clamp: phone shots range from "right above the paper"
+    # (~150 mm) to "standing over a desk" (~1200 mm). Outside that range,
+    # something else is wrong (EXIF focal length is for a different lens
+    # than the one used, photo was cropped breaking the pixel-width
+    # assumption, etc.) — better to fall back than to ship a bad number.
+    if height_mm < 150.0 or height_mm > 1500.0:
+        return None
+    return height_mm
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +526,11 @@ def preprocess_phone_image(
     """
     image_path = Path(image_path)
 
+    # Read EXIF from the original (HEIC/JPG/etc.) BEFORE conversion.
+    # convert_heic_to_png preserves it on the PNG output now too, but
+    # going to the original is one fewer thing to depend on.
+    focal_35mm_exif = read_focal_length_35mm(image_path)
+
     # Convert HEIC/HEIF to PNG if needed
     image_path = convert_heic_to_png(image_path)
 
@@ -417,6 +590,25 @@ def preprocess_phone_image(
         print(f"  WARNING: Low effective DPI ({effective_dpi:.0f}). "
               f"Hold the camera closer or use a higher resolution.")
 
+    # Camera-height auto-estimate from EXIF (used for parallax compensation
+    # when the user doesn't pass --phone-height). Only viable when the
+    # FocalLengthIn35mmFilm tag survived to our copy of the file.
+    camera_height_mm: Optional[float] = None
+    if focal_35mm_exif is not None:
+        camera_height_mm = estimate_camera_height_mm(
+            ids, corners, paper_size, img.shape, focal_35mm_exif,
+        )
+        if camera_height_mm is not None:
+            print(f"  Camera height (from EXIF f={focal_35mm_exif:.0f}mm): "
+                  f"{camera_height_mm:.0f} mm")
+        else:
+            print(f"  EXIF focal length present ({focal_35mm_exif:.0f}mm) "
+                  f"but camera-height estimate was implausible — falling "
+                  f"back to user/default value.")
+    else:
+        print("  No FocalLengthIn35mmFilm in EXIF — using user/default "
+              "phone height for parallax.")
+
     # Warp to frontal view — output covers the full paper
     pw_mm, ph_mm = PAPER_SIZES[paper_size.lower()]
     print(f"  Warping to frontal view at {effective_dpi:.0f} DPI...")
@@ -442,6 +634,26 @@ def preprocess_phone_image(
     cv2.imwrite(str(rectified_path), cropped)
     print(f"  Saved: {rectified_path}")
 
+    # Sidecar metadata: enough to reconstruct the mm↔pixel mapping later
+    # without re-running the homography. The LLM overlay step (and any
+    # future post-trace tooling) reads this to draw the trace polygons
+    # back onto the rectified photo at the right scale.
+    import json as _json
+    meta_path = output_dir / f"{stem}_rectified.json"
+    meta_path.write_text(_json.dumps({
+        "effective_dpi": float(effective_dpi),
+        "paper_size": paper_size.lower(),
+        "image_width_px": int(cropped.shape[1]),
+        "image_height_px": int(cropped.shape[0]),
+        "placement_zone_mm": [float(zx0), float(zy0), float(zx1), float(zy1)],
+        "exif_focal_length_35mm": (
+            float(focal_35mm_exif) if focal_35mm_exif is not None else None
+        ),
+        "camera_height_mm": (
+            float(camera_height_mm) if camera_height_mm is not None else None
+        ),
+    }, indent=2), encoding="utf-8")
+
     return {
         "rectified_image_path": str(rectified_path),
         "effective_dpi": effective_dpi,
@@ -449,6 +661,8 @@ def preprocess_phone_image(
         "detected_ids": detected_ids,
         "reprojection_error_mm": diagnostics["reprojection_error_mm"],
         "diagnostics": diagnostics,
+        "exif_focal_length_35mm": focal_35mm_exif,
+        "camera_height_mm": camera_height_mm,
     }
 
 

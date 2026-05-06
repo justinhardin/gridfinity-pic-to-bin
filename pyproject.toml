@@ -32,6 +32,8 @@ web = [
     "uvicorn[standard]",
     "python-multipart",
     "sse-starlette",
+    "anthropic",
+    "python-dotenv",
 ]
 
 [project.scripts]
