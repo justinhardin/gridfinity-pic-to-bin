@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from pic_to_bin.trace_tool import (

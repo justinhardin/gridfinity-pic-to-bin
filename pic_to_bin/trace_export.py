@@ -4,7 +4,6 @@ Handles scaling from pixels to mm, clearance offset, and tolerance outline.
 """
 
 import math
-from typing import Optional
 
 import ezdxf
 import numpy as np
