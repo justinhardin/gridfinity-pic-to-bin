@@ -200,6 +200,11 @@ class JobState:
             "grid_units_x": (self.layout_result or {}).get("grid_units_x"),
             "grid_units_y": (self.layout_result or {}).get("grid_units_y"),
             "artifacts": self._artifact_urls(),
+            # Surface input filenames + params + part_name so the frontend
+            # can repopulate the form when resuming a job via ?job=<uuid>.
+            "input_filenames": [p.name for p in self.input_image_paths],
+            "params": dict(self.params),
+            "part_name": self.part_name,
         }
 
     def _artifact_urls(self) -> dict[str, str]:

@@ -807,7 +807,9 @@ button.secondary:hover {
 }
 .overlay-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  /* Twice the per-column min width so a single-tool job fills more of the
+     card and multi-tool jobs still wrap cleanly. */
+  grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
   gap: 0.75rem;
 }
 .overlay-figure {
@@ -818,11 +820,16 @@ button.secondary:hover {
 }
 .overlay-figure img {
   max-width: 100%;
-  max-height: 480px;
+  /* Doubled from 480px so the trace polygons read clearly even on a
+     small handheld photo. The contrast filter pushes the dimmed
+     photo background away from the polygon strokes (red / orange /
+     blue) so the lines stand out. */
+  max-height: 960px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--card-bg);
   display: block;
+  filter: contrast(1.2) saturate(1.1);
 }
 .overlay-figure figcaption {
   font-size: 0.85em;

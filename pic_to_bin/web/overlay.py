@@ -318,17 +318,21 @@ def generate_overlay_image(
     # showing through a concavity looked to it like two separate polygons.
     # A translucent red fill makes the tool region unambiguous: one connected
     # filled blob = one tool; multiple separate blobs = a real merge/split.
-    _plot("inner",     "#e63946", "-",  2.0, "Inner trace (SAM2)",
+    # Line widths are deliberately heavy so the polygons remain legible after
+    # the JPEG cap downsamples a multi-MB rectified photo.
+    _plot("inner",     "#e63946", "-",  4.0, "Inner trace (SAM2)",
           fill_alpha=0.22)
-    _plot("tolerance", "#ffa600", "--", 2.4, "Tolerance perimeter (cut)")
-    _plot("slot",      "#1d70b8", ":",  1.5, "Finger slot")
+    _plot("tolerance", "#ffa600", "--", 5.0, "Tolerance perimeter (cut)")
+    _plot("slot",      "#1d70b8", ":",  3.0, "Finger slot")
 
     # Legend in a translucent box; placed top-left so it doesn't overlap
-    # the centered tool in most photos.
+    # the centered tool in most photos. Bumped fontsize so it stays
+    # readable both for the LLM input and for a human inspecting the
+    # capped JPEG.
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.legend(handles, labels, loc="upper left",
-                  framealpha=0.7, fontsize=8)
+                  framealpha=0.7, fontsize=14)
 
     fig.savefig(str(output_path), dpi=100, bbox_inches="tight",
                 pad_inches=0)

@@ -378,6 +378,82 @@ def create_app(
             filename=download_filename(job.part_name, filename),
         )
 
+    @app.get("/jobs/{job_id}/inputs/{name}")
+    async def input_image(job_id: str, name: str):
+        """Serve an originally-uploaded input image.
+
+        Used by the resubmit flow when the user has restored a job: the
+        frontend re-fetches the original bytes from this endpoint and
+        re-uploads them under a fresh job. ``name`` must match one of
+        the input filenames on this job — we never let the URL select
+        an arbitrary file path.
+        """
+        job = job_manager.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        valid_names = {p.name for p in job.input_image_paths}
+        if name not in valid_names:
+            raise HTTPException(404, "input not found")
+        path = job.output_dir / "inputs" / name
+        if not path.exists():
+            raise HTTPException(404, "input file missing on disk")
+        ext = Path(name).suffix.lower()
+        media_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".heic": "image/heic",
+            ".heif": "image/heif",
+        }.get(ext, "application/octet-stream")
+        return FileResponse(path, media_type=media_type, filename=name)
+
+    @app.get("/jobs/{job_id}/inputs/{name}/preview")
+    async def input_preview(job_id: str, name: str):
+        """Browser-renderable thumbnail for an input image.
+
+        For jpg/png this is just the original file. For HEIC, the
+        browser can't render it natively, so we lazily decode via
+        pillow_heif on the first request and cache a small JPEG
+        thumbnail at ``inputs/<name>.preview.jpg`` for subsequent
+        loads. Used by the form-restore flow so step-2 thumbnails
+        come back the same way they were uploaded.
+        """
+        job = job_manager.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        valid_names = {p.name for p in job.input_image_paths}
+        if name not in valid_names:
+            raise HTTPException(404, "input not found")
+        src = job.output_dir / "inputs" / name
+        if not src.exists():
+            raise HTTPException(404, "input file missing on disk")
+
+        ext = Path(name).suffix.lower()
+        if ext not in (".heic", ".heif"):
+            media_type = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+            }.get(ext, "application/octet-stream")
+            return FileResponse(src, media_type=media_type)
+
+        cached = src.parent / f"{name}.preview.jpg"
+        if not cached.exists():
+            try:
+                from PIL import Image
+                import pillow_heif
+                pillow_heif.register_heif_opener()
+                with Image.open(src) as img:
+                    img.thumbnail((400, 400))
+                    img.convert("RGB").save(
+                        str(cached), format="JPEG", quality=70
+                    )
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    500, f"could not generate HEIC preview: {e}"
+                )
+        return FileResponse(cached, media_type="image/jpeg")
+
     @app.get("/jobs/{job_id}/overlays/{stem}")
     async def overlay(job_id: str, stem: str):
         """Serve a per-tool overlay image (rectified photo + trace polygons).

@@ -330,6 +330,47 @@ class PicApp extends LitElement {
     const hasLayout = !!summary.artifacts?.layout_preview;
     const hasFinal = !!summary.artifacts?.bin_config;
 
+    // Repopulate the form so the user sees the photos + tool heights they
+    // submitted — without this, reloading on a job ID drops them onto an
+    // empty form and they think their work is gone.
+    if (Array.isArray(summary.input_filenames) && summary.input_filenames.length > 0) {
+      const toolHeights = summary.params?.tool_heights || {};
+      this.files = summary.input_filenames.map((name, i) => {
+        const h = toolHeights[i] ?? toolHeights[String(i)] ?? null;
+        return {
+          // Synthetic stand-in for a File: only `.name` is read by the
+          // renderer + HEIC sniff. _submitJob detects `restored: true`
+          // and re-fetches the bytes from the server when the user
+          // submits a fresh job from this prepopulated form.
+          file: { name },
+          toolHeight: h !== null && h !== undefined ? Number(h) : null,
+          // The /preview endpoint serves the original for jpg/png and a
+          // lazily-cached JPEG thumbnail for HEIC, so the renderer's
+          // <img src=${dataUrl}> works for both. Re-upload still uses
+          // the no-suffix URL so the new job gets the original bytes.
+          dataUrl: `/jobs/${encodeURIComponent(jobId)}/inputs/${encodeURIComponent(name)}/preview`,
+          restored: true,
+        };
+      });
+    }
+    if (summary.params || summary.part_name) {
+      const fv = { ...FORM_DEFAULTS };
+      for (const [k, v] of Object.entries(summary.params || {})) {
+        // tool_heights is per-file (lives in `this.files[i].toolHeight`),
+        // not on the form itself. sam_corrective_points stays so
+        // pic-preview's willUpdate can re-seed its click state from it
+        // on the artifactKey bump that's about to fire.
+        if (k === "tool_heights") continue;
+        fv[k] = v;
+      }
+      if (summary.part_name) fv.part_name = summary.part_name;
+      this.formValues = fv;
+      // Mark every restored field as touched so SOFT_DEFAULT_FIELDS get
+      // sent back verbatim on resubmit instead of being dropped in favor
+      // of the auto-detect fallback.
+      this.touched = new Set(Object.keys(summary.params || {}));
+    }
+
     if (hasLayout) {
       this.layoutInfo = summary;
       this._artifactKey = Date.now();
@@ -514,7 +555,28 @@ class PicApp extends LitElement {
     const fd = new FormData();
     fd.append("params", JSON.stringify(params));
     for (const f of this.files) {
-      fd.append("images", f.file, f.file.name);
+      if (f.restored) {
+        // No real File object — bytes live on the server under the
+        // restored job's inputs/ dir. Fetch them so the new job gets
+        // the same images the original used. We use this.jobId because
+        // restoration always sets it before populating this.files.
+        try {
+          const url = `/jobs/${encodeURIComponent(this.jobId)}/inputs/${encodeURIComponent(f.file.name)}`;
+          const blob = await fetch(url).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.blob();
+          });
+          fd.append("images", blob, f.file.name);
+        } catch (e) {
+          this._fail(
+            `Could not re-fetch ${f.file.name} from the prior job: ${e.message}. ` +
+            `Remove and re-add it before submitting.`
+          );
+          return;
+        }
+      } else {
+        fd.append("images", f.file, f.file.name);
+      }
     }
 
     // Tear down any prior SSE so a re-submit doesn't get duplicate events
@@ -1329,6 +1391,24 @@ class PicPreview extends LitElement {
         this.correctivePoints = JSON.parse(JSON.stringify(fromServer));
       }
     }
+    // Auto-fetch the per-tool overlays as soon as a fresh layout exists.
+    // Generating them is just matplotlib drawing the trace DXF onto the
+    // rectified photo — no LLM round-trip — so there's no reason to gate
+    // it behind a button click. Dedupe by artifactKey so we don't spam
+    // the endpoint on every unrelated re-render.
+    if (
+      changed.has("artifactKey") &&
+      this.artifactKey &&
+      this.jobId &&
+      this._lastOverlayFetchKey !== this.artifactKey
+    ) {
+      this._lastOverlayFetchKey = this.artifactKey;
+      // Defer to a microtask so we don't trigger a state mutation inside
+      // willUpdate. _onShowOverlaysForClicks is gated by overlaysBusy /
+      // llmBusy / running, so it self-suppresses if it's not the right
+      // moment to fetch.
+      queueMicrotask(() => this._onShowOverlaysForClicks(true));
+    }
   }
 
   render() {
@@ -1344,6 +1424,15 @@ class PicPreview extends LitElement {
         ` : nothing}
         ${url ? html`<img class="preview-img" src=${`${url}?v=${k}`}>` : nothing}
       </div>
+
+      ${this.llmError ? html`
+        <div class="card llm-verdict-card error">
+          <p class="hint"><strong>LLM check failed.</strong> ${this.llmError}</p>
+        </div>
+      ` : nothing}
+
+      ${this.llmVerdict ? this._renderVerdictCard() : nothing}
+      ${this._renderStandaloneCorrectiveCard()}
 
       ${pdfUrl || svgUrl ? html`
         <div class="card fit-test-card">
@@ -1374,15 +1463,6 @@ class PicPreview extends LitElement {
         </div>
       ` : nothing}
 
-      ${this.llmError ? html`
-        <div class="card llm-verdict-card error">
-          <p class="hint"><strong>LLM check failed.</strong> ${this.llmError}</p>
-        </div>
-      ` : nothing}
-
-      ${this.llmVerdict ? this._renderVerdictCard() : nothing}
-      ${this._renderStandaloneCorrectiveCard()}
-
       <div class="card">
         <h2>Looks good?</h2>
         <div class="actions">
@@ -1391,8 +1471,15 @@ class PicPreview extends LitElement {
                   @click=${() => this.dispatchEvent(new CustomEvent("proceed"))}>
             ${this.running ? "Working…" : "Proceed → generate bin config"}
           </button>
+          <button class="primary"
+                  ?disabled=${this.llmBusy || this.running || this.overlaysBusy}
+                  @click=${this._onShowOverlaysForClicks}>
+            ${this.overlaysBusy
+              ? html`Loading overlays…`
+              : html`Add corrective clicks`}
+          </button>
           ${this.llmAvailable ? html`
-            <button class="primary llm-button"
+            <button class="secondary"
                     ?disabled=${this.llmBusy || this.running}
                     @click=${this._onCheckWithLlm}>
               ${this.llmBusy
@@ -1402,13 +1489,6 @@ class PicPreview extends LitElement {
                 : html`Check or refine with LLM`}
             </button>
           ` : nothing}
-          <button class="secondary"
-                  ?disabled=${this.llmBusy || this.running || this.overlaysBusy}
-                  @click=${this._onShowOverlaysForClicks}>
-            ${this.overlaysBusy
-              ? html`Loading overlays…`
-              : html`Add corrective clicks${this.llmAvailable ? ' (no LLM)' : ''}`}
-          </button>
         </div>
         ${this._renderAdvancedToggle()}
       </div>
@@ -1610,8 +1690,17 @@ class PicPreview extends LitElement {
     }
   };
 
-  _onShowOverlaysForClicks = async () => {
+  _onShowOverlaysForClicks = async (auto = false) => {
     if (this.overlaysBusy || this.llmBusy || this.running) return;
+    // If the user clicks the button after overlays already loaded
+    // (auto-fetch on layout-ready), just scroll to them rather than
+    // refetching. The auto path skips this — it's the one that loads
+    // them in the first place.
+    if (!auto && this.llmOverlays && this.llmOverlays.length > 0) {
+      const grid = this.querySelector(".overlay-grid");
+      if (grid) grid.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     this.overlaysBusy = true;
     this.correctiveError = null;
     try {
@@ -1624,16 +1713,36 @@ class PicPreview extends LitElement {
       }
       const data = await res.json();
       const list = Array.isArray(data.overlays) ? data.overlays : [];
-      if (list.length === 0) {
+      if (list.length === 0 && !auto) {
+        // Only surface this as an error on a manual click. The auto
+        // path runs unsolicited; an empty list there shouldn't pop a
+        // scary message in front of the user.
         throw new Error("No overlays were generated for this job.");
       }
       this.llmOverlays = list;
     } catch (err) {
-      this.correctiveError = err.message || String(err);
+      // Same rationale: auto-fetch failures are silent. The user can
+      // click "Add corrective clicks" manually to see the real error.
+      if (!auto) {
+        this.correctiveError = err.message || String(err);
+      }
     } finally {
       this.overlaysBusy = false;
     }
   };
+
+  _renderOverlayLegend() {
+    return html`
+      <p class="hint overlay-legend">
+        <span class="overlay-legend-swatch" style="border-color:#e63946;background:rgba(230,57,70,0.22)">red</span>
+        = inner trace (the tool region SAM2 segmented),
+        <span class="overlay-legend-swatch" style="border-color:#ffa600;border-style:dashed">orange dashed</span>
+        = tolerance perimeter (the line the bin will cut),
+        <span class="overlay-legend-swatch" style="border-color:#1d70b8;border-style:dotted">blue dotted</span>
+        = finger slot.
+      </p>
+    `;
+  }
 
   _renderStandaloneCorrectiveCard() {
     // Only show when overlays exist but no verdict — otherwise the
@@ -1656,6 +1765,7 @@ class PicPreview extends LitElement {
           Add SAM2 corrective clicks on the per-tool overlays below. Each
           click stays local until you press Apply — no LLM call is made.
         </p>
+        ${this._renderOverlayLegend()}
         <div class="overlay-grid">
           ${this.llmOverlays.map(o => this._renderClickableOverlay(o, k))}
         </div>
@@ -1688,15 +1798,10 @@ class PicPreview extends LitElement {
         ${overlays.length ? html`
           <div class="verdict-overlays">
             <p class="hint">
-              These are the overlays the LLM evaluated — your tool photo with
-              the trace polygons drawn on top at the same mm scale.
-              <span class="overlay-legend-swatch" style="border-color:#e63946">red solid</span>
-              = inner trace,
-              <span class="overlay-legend-swatch" style="border-color:#ffa600;border-style:dashed">orange dashed</span>
-              = tolerance perimeter (the line the bin will cut),
-              <span class="overlay-legend-swatch" style="border-color:#1d70b8;border-style:dotted">blue dotted</span>
-              = finger slot.
+              These are the overlays the LLM evaluated — your tool photo
+              with the trace polygons drawn on top at the same mm scale.
             </p>
+            ${this._renderOverlayLegend()}
             <div class="overlay-grid">
               ${overlays.map(o => this._renderClickableOverlay(o, k))}
             </div>
