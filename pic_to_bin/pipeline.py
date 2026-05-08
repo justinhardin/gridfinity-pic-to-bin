@@ -97,7 +97,7 @@ def run_pipeline(
     output_dir,
     paper_size: str = "legal",
     tolerance: float = 0.0,
-    axial_tolerance: float = 1.0,
+    axial_tolerance="auto",  # float or "auto" (taper-based heuristic)
     phone_height: Optional[float] = None,
     tool_taper: str = "top",
     gap: float = 3.0,
@@ -113,6 +113,7 @@ def run_pipeline(
     mask_erode: float = 0.0,
     display_smooth_sigma: float = 2.5,
     sam_model: str = "sam2.1_l.pt",
+    sam_corrective_points: Optional[dict] = None,
     skip_trace: bool = False,
     stop_after: StopAfter = "all",
     progress_cb: Optional[ProgressCallback] = None,
@@ -122,6 +123,14 @@ def run_pipeline(
     Args mirror the CLI flags. ``stop_after="layout"`` stops after the
     layout-preview step (used by the web app's preview-then-proceed flow).
     Re-running with ``skip_trace=True`` re-uses cached per-tool DXFs.
+
+    ``sam_corrective_points`` is an optional dict keyed by input-image
+    stem; each value is a list of ``{"x_mm": float, "y_mm": float,
+    "label": 0|1}`` clicks in the rectified-image mm frame (origin
+    top-left, +x right, +y down). They're forwarded to SAM2 as
+    additional point prompts so the LLM-driven re-do flow can correct
+    topology errors (e.g. SAM2 merging a white background gap into the
+    tool mask) that no numeric tolerance knob can fix.
 
     Returns a dict::
 
@@ -243,6 +252,13 @@ def run_pipeline(
                     fraction=(idx + 0.5) / max(n, 1),
                 ))
                 tool_height_mm = _resolve_tool_height(tool_heights, idx)
+                # Convert per-stem corrective points (mm in rectified-image
+                # frame) to pixel coords for segment_tool. dpi is the
+                # rectified image's effective DPI from phone_preprocess,
+                # so this is a direct linear scale.
+                stem_pts = _resolve_corrective_points(
+                    sam_corrective_points, img.stem, dpi,
+                )
                 result = refine_trace(
                     image_path=str(rectified_img),
                     dpi=dpi,
@@ -259,6 +275,7 @@ def run_pipeline(
                     tool_taper=tool_taper,
                     finger_slots=slots,
                     display_smooth_sigma_mm=display_smooth_sigma,
+                    sam_corrective_points=stem_pts,
                 )
                 dxf_paths.append(result["dxf_path"])
                 iters = result.get("refinement_iterations", 1)
@@ -438,12 +455,16 @@ examples:
              f"= looser fit, negative = tighter, "
              f"--tolerance -{TOLERANCE_BASELINE_MM} = exact trace match.")
     parser.add_argument(
-        "--axial-tolerance", type=float, default=1.0,
+        "--axial-tolerance", default="auto",
         help="Extra clearance (mm) along the tool's principal axis only "
-             "(default: 1.0). Each end of the tool gets pushed outward by "
-             "this amount, leaving the perpendicular extent unchanged. "
+             "(default: 'auto'). Each end of the tool gets pushed outward "
+             "by this amount, leaving the perpendicular extent unchanged. "
              "Compensates for SAM2 mask under-detection at tapered tool "
-             "tips. Set to 0 for fully uniform tolerance.")
+             "tips. 'auto' picks a value from the polygon: a square-ended "
+             "tool (e.g. ruler) gets ~0.5 mm; a sharply tapered tool "
+             "(e.g. shears) gets up to ~3 mm — formula is "
+             "0.5 + 0.014 × axial_length × taper. Pass an explicit number "
+             "(e.g. 1.5) to override; pass 0 for fully uniform tolerance.")
     parser.add_argument(
         "--phone-height", type=float, default=None,
         help=f"Phone camera height above the template in mm "
@@ -621,6 +642,40 @@ def _parse_bool(value: str) -> bool:
         return False
     raise argparse.ArgumentTypeError(
         f"Expected true/false, got: {value!r}")
+
+
+def _resolve_corrective_points(
+    sam_corrective_points: Optional[dict],
+    stem: str,
+    dpi: float,
+) -> Optional[list[tuple[float, float, int]]]:
+    """Convert per-stem mm-frame clicks to pixel-frame (x, y, label) tuples.
+
+    ``sam_corrective_points`` is keyed by the input image stem (no
+    extension); each value is a list of ``{"x_mm", "y_mm", "label"}``
+    dicts in the rectified-image's mm frame, origin top-left.
+    Multiplying by ``dpi/25.4`` lands them on rectified-image pixels.
+    Returns ``None`` when no entries apply (so the SAM2 path stays on
+    the bbox-only fast path).
+    """
+    if not sam_corrective_points:
+        return None
+    raw = sam_corrective_points.get(stem) or []
+    if not raw:
+        return None
+    px_per_mm = dpi / 25.4
+    out: list[tuple[float, float, int]] = []
+    for pt in raw:
+        try:
+            x_px = float(pt["x_mm"]) * px_per_mm
+            y_px = float(pt["y_mm"]) * px_per_mm
+            label = int(pt["label"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if label not in (0, 1):
+            continue
+        out.append((x_px, y_px, label))
+    return out or None
 
 
 def _resolve_tool_height(tool_heights, idx: int, default: float = 0.0) -> float:

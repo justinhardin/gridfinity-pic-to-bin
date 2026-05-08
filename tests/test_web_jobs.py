@@ -189,6 +189,28 @@ def test_redo_layout_only_uses_skip_trace(mgr, fake_pipeline):
     assert job.params["gap"] == 5.0
 
 
+def test_redo_with_sam_corrective_points_forwards_to_pipeline(mgr, fake_pipeline):
+    """A redo carrying sam_corrective_points must forward them to
+    run_pipeline so segment_tool can prompt SAM2 with the clicks."""
+    job = mgr.create_job(params={"tool_heights": 17.0},
+                         input_files=[("a.png", b"X")])
+    mgr.submit_phase_a(job)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION)
+
+    points = {"a": [{"x_mm": 62.0, "y_mm": 35.0, "label": 0}]}
+    # The server endpoint force-overrides layout_only=False when
+    # corrective points are present; the JobManager itself doesn't, so
+    # we pass layout_only=False directly here to mirror what the
+    # server's redo handler would.
+    mgr.submit_redo(job, new_params={"sam_corrective_points": points},
+                    layout_only=False)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION and len(fake_pipeline) == 2)
+
+    assert fake_pipeline[1]["skip_trace"] is False
+    assert fake_pipeline[1]["kwargs"]["sam_corrective_points"] == points
+    assert job.params["sam_corrective_points"] == points
+
+
 def test_run_llm_evaluate_returns_overlay_stems(mgr, fake_pipeline, monkeypatch, tmp_path):
     """End-to-end through run_llm_evaluate: stub the Anthropic call and
     overlay generator, verify the returned ``overlay_stems`` list lines
@@ -414,3 +436,96 @@ def test_sweep_removes_old_terminal_jobs(mgr, fake_pipeline):
     assert mgr.sweep_expired() == 1
     assert not (mgr.jobs_root / job.id).exists()
     assert mgr.get(job.id) is None
+
+
+# ---------------------------------------------------------------------------
+# LLM corrective-points helpers
+# ---------------------------------------------------------------------------
+
+
+def test_rectified_dimensions_mm_reads_sidecar(tmp_path):
+    from pic_to_bin.web.jobs import _rectified_dimensions_mm
+    import json as _json
+
+    rect = tmp_path / "tool_rectified.png"
+    rect.write_bytes(b"")  # contents irrelevant; helper reads sidecar
+    (tmp_path / "tool_rectified.json").write_text(_json.dumps({
+        "effective_dpi": 200.0,
+        "image_width_px": 1000,
+        "image_height_px": 2000,
+    }), encoding="utf-8")
+    w_mm, h_mm = _rectified_dimensions_mm(rect)
+    # 1000 px / 200 dpi * 25.4 = 127 mm; 2000 px → 254 mm
+    assert abs(w_mm - 127.0) < 0.01
+    assert abs(h_mm - 254.0) < 0.01
+
+
+def test_rectified_dimensions_mm_missing_sidecar(tmp_path):
+    from pic_to_bin.web.jobs import _rectified_dimensions_mm
+    rect = tmp_path / "tool_rectified.png"
+    rect.write_bytes(b"")
+    assert _rectified_dimensions_mm(rect) is None
+
+
+def test_merge_corrective_points_groups_by_stem(tmp_path):
+    from pic_to_bin.web.jobs import _merge_corrective_points
+
+    # Two rectified paths in stem subdirs (mirrors run_pipeline output).
+    rect_a = tmp_path / "imgA" / "imgA_rectified.png"
+    rect_b = tmp_path / "imgB" / "imgB_rectified.png"
+    rect_a.parent.mkdir()
+    rect_b.parent.mkdir()
+    rectified = [rect_a, rect_b]
+
+    new_points = [
+        {"overlay_index": 1, "x_mm": 12.0, "y_mm": 34.0, "label": 0,
+         "reason": "white gap"},
+        {"overlay_index": 2, "x_mm": 56.0, "y_mm": 78.0, "label": 1},
+        # Out-of-range index — must be silently dropped.
+        {"overlay_index": 99, "x_mm": 1.0, "y_mm": 2.0, "label": 0},
+    ]
+    out = _merge_corrective_points(None, new_points, rectified)
+    assert set(out.keys()) == {"imgA", "imgB"}
+    assert out["imgA"] == [{"x_mm": 12.0, "y_mm": 34.0, "label": 0}]
+    assert out["imgB"] == [{"x_mm": 56.0, "y_mm": 78.0, "label": 1}]
+
+
+def test_merge_corrective_points_accumulates_across_iterations(tmp_path):
+    from pic_to_bin.web.jobs import _merge_corrective_points
+
+    rect_a = tmp_path / "imgA" / "imgA_rectified.png"
+    rect_a.parent.mkdir()
+    rectified = [rect_a]
+
+    iter1 = [{"overlay_index": 1, "x_mm": 10.0, "y_mm": 20.0, "label": 0}]
+    after1 = _merge_corrective_points(None, iter1, rectified)
+
+    iter2 = [{"overlay_index": 1, "x_mm": 30.0, "y_mm": 40.0, "label": 0}]
+    after2 = _merge_corrective_points(after1, iter2, rectified)
+
+    # Iteration 2's clicks accumulate onto iteration 1's — the earlier
+    # click stays active so SAM2 doesn't regress on what it fixed.
+    assert after2["imgA"] == [
+        {"x_mm": 10.0, "y_mm": 20.0, "label": 0},
+        {"x_mm": 30.0, "y_mm": 40.0, "label": 0},
+    ]
+
+
+def test_pipeline_kwargs_forwards_sam_corrective_points():
+    """Auto-loop merges points into job.params['sam_corrective_points'];
+    the kwargs filter must pass them through to run_pipeline."""
+    from pic_to_bin.web.jobs import _pipeline_kwargs
+
+    params = {
+        "tool_heights": 17.0,
+        "sam_corrective_points": {
+            "imgA": [{"x_mm": 10.0, "y_mm": 20.0, "label": 0}],
+        },
+        # Unknown key — must be filtered out.
+        "ignored_field": "drop me",
+    }
+    out = _pipeline_kwargs(params)
+    assert out["sam_corrective_points"] == {
+        "imgA": [{"x_mm": 10.0, "y_mm": 20.0, "label": 0}],
+    }
+    assert "ignored_field" not in out

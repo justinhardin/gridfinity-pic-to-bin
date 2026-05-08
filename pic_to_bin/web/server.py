@@ -239,16 +239,26 @@ def create_app(
         job = job_manager.get(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.ERROR):
+        if job.status not in (
+            JobStatus.AWAITING_DECISION,
+            JobStatus.ERROR,
+            JobStatus.COMPLETE,
+        ):
             raise HTTPException(
                 409,
-                f"can only redo from awaiting_decision or error "
+                f"can only redo from awaiting_decision, error, or complete "
                 f"(current: {job.status.value})",
             )
         new_params = payload.get("params") or {}
         layout_only = bool(payload.get("layout_only", True))
         if not isinstance(new_params, dict):
             raise HTTPException(400, "params must be a JSON object")
+        # Corrective SAM2 clicks invalidate any cached trace — they only
+        # take effect on a fresh segmentation. Override the flag here so a
+        # client can't accidentally request layout_only=True alongside
+        # corrective points and silently get the cached (uncorrected) DXF.
+        if new_params.get("sam_corrective_points"):
+            layout_only = False
         job_manager.submit_redo(job, new_params, layout_only=layout_only)
         return {"job_id": job.id, "status": job.status.value}
 
@@ -271,10 +281,10 @@ def create_app(
         job = job_manager.get(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        if job.status != JobStatus.AWAITING_DECISION:
+        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.COMPLETE):
             raise HTTPException(
                 409,
-                f"can only evaluate from awaiting_decision "
+                f"can only evaluate from awaiting_decision or complete "
                 f"(current: {job.status.value})",
             )
         auto_loop = bool(payload.get("auto_loop", False))
@@ -296,17 +306,60 @@ def create_app(
         except Exception as e:  # noqa: BLE001
             logger.exception("LLM evaluation failed for job %s", job_id)
             raise HTTPException(500, f"LLM evaluation failed: {e}") from e
+        overlays_payload: list[dict] = []
+        for s in overlay_stems:
+            entry = {
+                "stem": s,
+                "url": f"/jobs/{job.id}/overlays/{s}",
+            }
+            dims = job_manager.overlay_dims_for_stem(job, s)
+            if dims is not None:
+                entry["width_mm"] = round(dims[0], 3)
+                entry["height_mm"] = round(dims[1], 3)
+            overlays_payload.append(entry)
         return {
             "verdict": verdict.to_jsonable(),
             "iterations": iterations,
-            "overlays": [
-                {
-                    "stem": s,
-                    "url": f"/jobs/{job.id}/overlays/{s}",
-                }
-                for s in overlay_stems
-            ],
+            "overlays": overlays_payload,
         }
+
+    @app.post("/jobs/{job_id}/overlays")
+    async def generate_overlays(job_id: str) -> dict:
+        """Render per-tool overlays without calling the LLM.
+
+        Used by the manual corrective-click flow: the frontend renders
+        a click UI on top of these overlays so the user can pick
+        SAM2 negative/positive points themselves.
+        """
+        job = job_manager.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.COMPLETE):
+            raise HTTPException(
+                409,
+                f"can only generate overlays from awaiting_decision or "
+                f"complete (current: {job.status.value})",
+            )
+        loop = asyncio.get_running_loop()
+        try:
+            stems = await loop.run_in_executor(
+                job_manager._executor, job_manager.generate_overlays, job,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Overlay generation failed for job %s", job_id)
+            raise HTTPException(500, f"overlay generation failed: {e}") from e
+        overlays_payload: list[dict] = []
+        for s in stems:
+            entry = {
+                "stem": s,
+                "url": f"/jobs/{job.id}/overlays/{s}",
+            }
+            dims = job_manager.overlay_dims_for_stem(job, s)
+            if dims is not None:
+                entry["width_mm"] = round(dims[0], 3)
+                entry["height_mm"] = round(dims[1], 3)
+            overlays_payload.append(entry)
+        return {"overlays": overlays_payload}
 
     @app.get("/jobs/{job_id}/artifacts/{name}")
     async def artifact(job_id: str, name: str):

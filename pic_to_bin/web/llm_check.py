@@ -125,6 +125,56 @@ _VERDICT_TOOL = {
                 "properties": ADJUSTABLE_PARAMS,
                 "additionalProperties": False,
             },
+            "corrective_points": {
+                "type": "array",
+                "description": (
+                    "Per-overlay corrective clicks for the SAM2 "
+                    "segmenter. Use ONLY when the RED inner-trace line "
+                    "itself is wrong — i.e. it fills a region that's "
+                    "clearly NOT part of the tool (white background "
+                    "merged in, e.g. a gap between handles), or it "
+                    "misses a region that clearly IS part of the tool. "
+                    "Do NOT use these for clearance/tolerance issues; "
+                    "use suggested_params for those. Coordinates are "
+                    "in millimeters within the OVERLAY image's frame: "
+                    "origin at top-left, +x right, +y down. Each "
+                    "overlay's mm dimensions are stated in the user "
+                    "message. Empty / omitted when the inner trace "
+                    "looks correct."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "overlay_index": {
+                            "type": "integer",
+                            "description": (
+                                "1-based index matching the 'Overlay N:' "
+                                "label in the user message."
+                            ),
+                        },
+                        "x_mm": {"type": "number"},
+                        "y_mm": {"type": "number"},
+                        "label": {
+                            "type": "integer",
+                            "enum": [0, 1],
+                            "description": (
+                                "1 = positive click (this point IS tool, "
+                                "include it). 0 = negative click (this "
+                                "point is NOT tool, exclude it)."
+                            ),
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Brief justification, e.g. 'white gap "
+                                "between the two open blades'."
+                            ),
+                        },
+                    },
+                    "required": ["overlay_index", "x_mm", "y_mm", "label"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": ["ok", "reasoning"],
         "additionalProperties": False,
@@ -141,9 +191,19 @@ You will receive:
 - One or more OVERLAY images. Each overlay is the actual tool photo \
 (perspective-corrected, mm-scale, lightly dimmed) with the trace polygons \
 drawn on top in their detected position, at the same scale as the photo. \
-Three colored line styles appear:
-    • Red solid — the inner trace (SAM2 segmentation result). Where the \
-software thinks the tool's edge is.
+Three colored markings appear:
+    • Red — the inner trace (SAM2 segmentation result). The TOOL REGION \
+is shown as a translucent red FILL bounded by a solid red outline. ONE \
+connected red-filled blob = one tool, traced as a single closed polygon. \
+Concavities in the silhouette (e.g. the V-shaped gap between two open \
+blades of pruning shears, the slot in a wrench head, the opening of a \
+clamp) appear as UNFILLED background showing through INSIDE the bounding \
+box of the trace — these are NORMAL and CORRECT: they mean the trace \
+properly excluded background that intrudes into the tool's silhouette. \
+A real disconnected segmentation would show as TWO SEPARATE red-filled \
+blobs with a clean gap of fully unfilled space between them. Do not \
+confuse a concavity (one filled blob with an indentation) with a \
+disconnection (two filled blobs).
     • Orange dashed — the TOLERANCE perimeter. This is the polygon the bin \
 will actually cut against. Your judgment is about THIS line.
     • Blue dotted — the finger-access slot cutout. Ignore for fit purposes.
@@ -156,26 +216,57 @@ overlay will accommodate the physical tool visible underneath.
 
 Good = the orange-dashed line clears the tool outline everywhere with a \
 roughly uniform ~2 mm gap, and no feature of the tool is clipped or notably \
-misshapen by the perimeter. The red-solid inner trace should also visibly \
-follow the tool's outline; if it doesn't, the segmentation itself is off.
+misshapen by the perimeter. The red-filled inner trace should also visibly \
+cover the tool's silhouette (one connected blob per tool, with concavities \
+correctly left unfilled); if the fill clearly covers non-tool or misses \
+tool, the segmentation itself is off.
 
 Bad = the orange-dashed line touches or cuts into the tool outline \
 anywhere, visibly rounds off or clips an intentional feature (a corner, \
 a notch, a tip), or has obviously asymmetric clearance (one side ~0 mm, \
-the other ~5 mm). Also bad: the red-solid inner trace is noticeably \
-smaller or larger than the tool (means the segmentation drifted).
+the other ~5 mm). Also bad: the red-filled inner trace clearly extends \
+past the tool into the background, or clearly fails to cover an obvious \
+part of the tool (means the segmentation drifted). A concavity in the \
+red fill that mirrors a real concavity in the tool's silhouette is NOT a \
+problem.
 
 Compare carefully — the overlay is at exact tool scale, so you can read \
 the gap directly off the image. A 2 mm gap between the orange-dashed line \
 and the tool's actual edge is the target. If the dashed line sits ON the \
 tool's edge, the pocket will be too tight and the tool won't fit.
 
-When you find a problem, suggest the smallest sensible parameter \
-adjustment that would fix it. Choose from the parameters in the tool \
-input schema; do NOT invent new parameter names. Common fixes:
+When you find a problem, decide first which KIND it is:
+
+A) The RED inner-trace fill is wrong — it covers a region that's not \
+tool (e.g. white background between two open blades that SAM2 merged \
+in), or omits a region that obviously is tool. No numeric tolerance \
+knob can fix this; the segmentation itself needs corrective input. \
+\
+Before flagging this, sanity-check: count the red-filled blobs. The \
+overlay should have ONE filled blob per physical tool. If you see \
+one filled blob with a concavity (unfilled background visible inside \
+the bounding box, e.g. between open pruning-shear blades), that is \
+NOT a topology error — the trace correctly went around a background \
+intrusion. Only flag a problem when the filled coverage clearly \
+includes obvious non-tool pixels OR omits obvious tool pixels. \
+\
+Emit `corrective_points` with one click per problem region: label=0 \
+("not tool") for incorrectly-filled regions, label=1 ("is tool") for \
+incorrectly-missed regions. Place the click in the visual center of \
+the wrong region. Coordinates are in mm within the overlay's frame \
+(origin top-left, +x right, +y down). The user message states each \
+overlay's mm dimensions. One or two well-placed points is plenty — \
+don't spam clicks along an edge. The pipeline will re-run SAM2 with \
+your clicks and produce a new mask.
+
+B) The RED inner-trace looks right, but the ORANGE tolerance perimeter \
+is wrong — too tight, asymmetric, rounded off, etc. This is a numeric \
+tolerance/geometry issue. Emit `suggested_params` from the input \
+schema; do NOT invent new parameter names. Common fixes:
 - Tip too short / tool tip extends past the dashed line at one end:
     increase axial_tolerance by 0.5–1.0.
-- Whole pocket too tight uniformly (dashed line too close to tool everywhere):
+- Whole pocket too tight uniformly (dashed line too close to tool \
+everywhere):
     increase tolerance by 0.3–0.5 (max +1.0 in one step).
 - Sharp corners on the tool are rounded off in the dashed line:
     decrease display_smooth_sigma to 1.0 or 0.
@@ -183,7 +274,10 @@ input schema; do NOT invent new parameter names. Common fixes:
 photo):
     increase mask_erode to 0.3.
 
-Always call the evaluate_layout_fit tool exactly once with your verdict.
+If both kinds of problem are present, emit BOTH `corrective_points` \
+and `suggested_params`. Either field may be empty/omitted when not \
+applicable. Always call the evaluate_layout_fit tool exactly once \
+with your verdict.
 """
 
 
@@ -194,6 +288,7 @@ class LLMVerdict:
     ok: bool
     reasoning: str
     suggested_params: dict = field(default_factory=dict)
+    corrective_points: list = field(default_factory=list)
     model: str = ""
 
     def to_jsonable(self) -> dict:
@@ -201,6 +296,7 @@ class LLMVerdict:
             "ok": self.ok,
             "reasoning": self.reasoning,
             "suggested_params": dict(self.suggested_params),
+            "corrective_points": list(self.corrective_points),
             "model": self.model,
         }
 
@@ -256,10 +352,34 @@ def _parse_verdict(response, model: str) -> LLMVerdict:
             suggested = {
                 k: v for k, v in suggested.items() if k in ADJUSTABLE_PARAMS
             }
+            raw_points = args.get("corrective_points") or []
+            corrective: list[dict] = []
+            for pt in raw_points:
+                if not isinstance(pt, dict):
+                    continue
+                try:
+                    idx = int(pt["overlay_index"])
+                    x = float(pt["x_mm"])
+                    y = float(pt["y_mm"])
+                    label = int(pt["label"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if label not in (0, 1):
+                    continue
+                entry = {
+                    "overlay_index": idx,
+                    "x_mm": x,
+                    "y_mm": y,
+                    "label": label,
+                }
+                if isinstance(pt.get("reason"), str):
+                    entry["reason"] = pt["reason"]
+                corrective.append(entry)
             return LLMVerdict(
                 ok=ok,
                 reasoning=reasoning,
                 suggested_params=suggested,
+                corrective_points=corrective,
                 model=model,
             )
     raise RuntimeError(
@@ -278,6 +398,7 @@ def evaluate_layout(
     current_params: dict,
     api_key: str,
     *,
+    overlay_dimensions_mm: Optional[Iterable[tuple[float, float]]] = None,
     model: str = DEFAULT_MODEL,
     client: Optional[anthropic.Anthropic] = None,
     max_tokens: int = 1024,
@@ -317,15 +438,25 @@ def evaluate_layout(
     # against — they show the tool photo with the trace polygons drawn on
     # top at exact mm scale, so the model doesn't have to mentally align
     # two different coordinate systems.
+    dims = list(overlay_dimensions_mm) if overlay_dimensions_mm else []
     user_content: list[dict] = []
     for i, p in enumerate(rectified_paths, start=1):
         if not p.exists():
             raise FileNotFoundError(f"rectified image not found: {p}")
+        if i - 1 < len(dims):
+            w_mm, h_mm = dims[i - 1]
+            dim_text = (
+                f" Overlay frame is {w_mm:.1f} mm wide × {h_mm:.1f} mm "
+                f"tall (origin at top-left, +x right, +y down) — use "
+                f"these dimensions if you need to emit corrective_points."
+            )
+        else:
+            dim_text = ""
         user_content.append({
             "type": "text",
             "text": (
                 f"Overlay {i}: physical tool (dimmed background) with "
-                f"trace polygons drawn on top at mm scale."
+                f"trace polygons drawn on top at mm scale.{dim_text}"
             ),
         })
         user_content.append(_encode_image(p))

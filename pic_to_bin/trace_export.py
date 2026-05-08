@@ -156,6 +156,101 @@ def _principal_axis_angle(polygons: list[list[tuple[float, float]]]) -> float:
     return float(np.arctan2(axis[1], axis[0]))
 
 
+def _auto_axial_tolerance_mm(
+    polygons: list[list[tuple[float, float]]],
+) -> float:
+    """Compute an axial tolerance based on the tool's tip taper.
+
+    SAM2 under-detects sharp/tapered tips much more than square ends.
+    The signal we want isn't length per se — it's how narrow the tool
+    gets at its axial extremes relative to its body. A long ruler with
+    square ends (taper ≈ 0) only needs the floor tolerance; long
+    tapered shears (taper ≈ 0.85) need ~3 mm.
+
+    Algorithm:
+      1. PCA principal axis from the polygon point cloud (existing helper).
+      2. Project all points to the rotated frame; bin along the axis.
+      3. In each bin, perpendicular extent = max − min of cross-axis
+         coordinate. Empty / tiny bins are skipped.
+      4. tip_width  = mean of width in the outer 10% of bins (each end).
+         body_width = median of width across the middle 80% of bins.
+      5. taper = clamp(1 − tip_width / body_width, 0, 1).
+      6. axial_tol = 0.5 + 0.012 × axial_length × taper.
+
+    Returns a non-negative float. On a degenerate polygon (no points,
+    zero extent) returns 0.5 mm — the "always include a little tip
+    clearance" floor that matches typical SAM2 tip slop.
+    """
+    if not polygons:
+        return 0.5
+
+    # Pick the largest polygon by point count as the outer outline —
+    # smaller polygons (interior holes) don't shape the tip taper.
+    outer = max(polygons, key=len)
+    if len(outer) < 8:
+        return 0.5
+
+    angle = _principal_axis_angle([outer])
+    cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+    rot = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
+    pts = np.array(outer, dtype=float) @ rot.T  # (N, 2): col 0 axial, col 1 perp
+
+    axial = pts[:, 0]
+    perp = pts[:, 1]
+    axial_min, axial_max = float(axial.min()), float(axial.max())
+    axial_length = axial_max - axial_min
+    if axial_length < 1e-3:
+        return 0.5
+
+    # Bin along the axis. 30 bins is enough resolution for a typical
+    # hand tool (axial_length ~ 50–300 mm) without making each bin so
+    # narrow that it captures only a handful of polygon points.
+    n_bins = 30
+    edges = np.linspace(axial_min, axial_max, n_bins + 1)
+    widths = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        lo, hi = edges[i], edges[i + 1]
+        mask_in = (axial >= lo) & (axial <= hi)
+        if mask_in.sum() < 2:
+            continue
+        widths[i] = float(perp[mask_in].max() - perp[mask_in].min())
+    valid = ~np.isnan(widths)
+    if valid.sum() < 5:
+        return 0.5
+
+    # Tip widths: take the median of the outermost 2 bins on EACH end,
+    # then use the minimum of the two ends. Asymmetric tools (e.g. a
+    # screwdriver: sharp tip + chunky handle, or pruning shears: sharp
+    # blades + thick pivot/handle) need the formula driven by the
+    # sharper end — that's where SAM2 under-detects, and the symmetric
+    # axial stretch will give the square end a bit of bonus clearance,
+    # which is harmless.
+    # Body widths: median of the middle 80% of bins, robust to the
+    # occasional fat handle/grip bulge.
+    n_tip = max(1, int(round(0.10 * n_bins)))
+    n_outer = min(n_tip, 2)  # median of the outermost 2 bins per end
+    left_end = widths[:n_outer]
+    left_end = left_end[~np.isnan(left_end)]
+    right_end = widths[-n_outer:]
+    right_end = right_end[~np.isnan(right_end)]
+    body_widths = widths[n_tip:-n_tip]
+    body_widths = body_widths[~np.isnan(body_widths)]
+    if left_end.size == 0 or right_end.size == 0 or body_widths.size == 0:
+        return 0.5
+    tip_w = float(min(np.median(left_end), np.median(right_end)))
+    body_w = float(np.median(body_widths))
+    if body_w < 1e-3:
+        return 0.5
+
+    taper = max(0.0, min(1.0, 1.0 - tip_w / body_w))
+    axial_tol = 0.5 + 0.014 * axial_length * taper
+
+    print(f"  Auto axial tolerance: length={axial_length:.1f} mm, "
+          f"tip_w={tip_w:.1f} mm (sharper end), body_w={body_w:.1f} mm, "
+          f"taper={taper:.2f} → {axial_tol:.2f} mm")
+    return float(axial_tol)
+
+
 def _axial_stretch_polygons(polygons: list[list[tuple[float, float]]],
                             axial_extra_mm: float,
                             ) -> list[list[tuple[float, float]]]:
@@ -1157,7 +1252,7 @@ def _scale_svg_path_coords(d: str, factor: float) -> str:
 
 def potrace_to_dxf(path, output_path: str, scale: float,
                    clearance_mm: float = 0.0, tolerance_mm: float = 0.0,
-                   axial_tolerance_mm: float = 0.0,
+                   axial_tolerance_mm=0.0,
                    img_shape: tuple = None, simplify_epsilon: float = 0.3,
                    slot_polygon: list = None,
                    display_smooth_sigma_mm: float = 2.5):
@@ -1227,6 +1322,20 @@ def potrace_to_dxf(path, output_path: str, scale: float,
     # negative shrinks it.
     doc.layers.add("TOLERANCE", color=3)  # green for visual distinction
     outer_polygons = _offset_polygons(display_inner, tolerance_mm)
+    # "auto" sentinel (or empty string from a blank web form field)
+    # triggers the taper-based heuristic; explicit numeric values
+    # still take precedence.
+    if isinstance(axial_tolerance_mm, str):
+        s = axial_tolerance_mm.strip().lower()
+        if s == "" or s == "auto":
+            axial_tolerance_mm = _auto_axial_tolerance_mm(display_inner)
+        else:
+            try:
+                axial_tolerance_mm = float(s)
+            except ValueError:
+                axial_tolerance_mm = 0.0
+    elif axial_tolerance_mm is None:
+        axial_tolerance_mm = _auto_axial_tolerance_mm(display_inner)
     if abs(axial_tolerance_mm) > 0.001:
         outer_polygons = _axial_stretch_polygons(outer_polygons,
                                                  axial_tolerance_mm)

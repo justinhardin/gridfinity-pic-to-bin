@@ -267,6 +267,91 @@ def test_evaluate_layout_rejects_missing_preview(tmp_path):
         )
 
 
+def test_evaluate_layout_parses_corrective_points(tmp_path):
+    """Tool call with corrective_points → list lands on the verdict;
+    bad entries (missing keys, out-of-range labels) are dropped."""
+    rectified = _png_path(tmp_path, "tool_rectified.png")
+    preview = _png_path(tmp_path, "layout_preview.png")
+
+    fake_response = _FakeResponse([
+        _FakeBlock(
+            type="tool_use",
+            name="evaluate_layout_fit",
+            input={
+                "ok": False,
+                "reasoning": "Inner trace fills the white gap between the "
+                             "two open shear blades.",
+                "corrective_points": [
+                    {
+                        "overlay_index": 1,
+                        "x_mm": 65.0,
+                        "y_mm": 80.0,
+                        "label": 0,
+                        "reason": "white gap between blades",
+                    },
+                    # Missing y_mm — must be dropped silently.
+                    {"overlay_index": 1, "x_mm": 10.0, "label": 1},
+                    # Label out of {0, 1} — dropped.
+                    {"overlay_index": 1, "x_mm": 20.0, "y_mm": 30.0,
+                     "label": 5},
+                ],
+            },
+        ),
+    ])
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+
+    verdict = evaluate_layout(
+        rectified_paths=[rectified],
+        layout_preview_path=preview,
+        current_params={},
+        api_key="test-key",
+        client=fake_client,
+    )
+    assert verdict.ok is False
+    assert len(verdict.corrective_points) == 1
+    pt = verdict.corrective_points[0]
+    assert pt["overlay_index"] == 1
+    assert pt["x_mm"] == 65.0
+    assert pt["y_mm"] == 80.0
+    assert pt["label"] == 0
+    assert pt["reason"] == "white gap between blades"
+
+
+def test_evaluate_layout_includes_overlay_dimensions_in_prompt(tmp_path):
+    """When overlay_dimensions_mm is supplied, each overlay's mm size
+    is mentioned in the user message so the LLM can pick coordinates."""
+    rectified = _png_path(tmp_path, "tool_rectified.png")
+    preview = _png_path(tmp_path, "layout_preview.png")
+
+    fake_response = _FakeResponse([
+        _FakeBlock(
+            type="tool_use",
+            name="evaluate_layout_fit",
+            input={"ok": True, "reasoning": "fine"},
+        ),
+    ])
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+
+    evaluate_layout(
+        rectified_paths=[rectified],
+        layout_preview_path=preview,
+        current_params={},
+        api_key="test-key",
+        client=fake_client,
+        overlay_dimensions_mm=[(130.5, 220.0)],
+    )
+
+    call_kwargs = fake_client.messages.create.call_args.kwargs
+    user_msg = call_kwargs["messages"][0]["content"]
+    text_blocks = [
+        b["text"] for b in user_msg if b.get("type") == "text"
+    ]
+    assert any("130.5 mm" in t and "220.0 mm" in t for t in text_blocks), \
+        f"expected overlay mm dims in prompt, got: {text_blocks}"
+
+
 def test_llmverdict_to_jsonable_roundtrip():
     v = LLMVerdict(
         ok=False,
@@ -279,6 +364,7 @@ def test_llmverdict_to_jsonable_roundtrip():
         "ok": False,
         "reasoning": "too tight",
         "suggested_params": {"tolerance": 0.4},
+        "corrective_points": [],
         "model": "claude-sonnet-4-6",
     }
     # Ensure mutating the returned dict doesn't reach the dataclass

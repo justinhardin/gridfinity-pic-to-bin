@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import json
 import re
 import shutil
 import sys
@@ -243,6 +244,13 @@ class JobManager:
         # run land in <job_dir>/job.log instead of the server console.
         # No-op for non-worker threads (uvicorn handlers, main).
         _install_thread_local_streams()
+        # Rebuild the in-memory registry from on-disk state so jobs survive
+        # a server restart. Dirs without job_state.json (created before this
+        # persistence was added) are skipped — without persisted params we
+        # can't safely redo them.
+        restored = self._restore_jobs()
+        if restored:
+            print(f"[jobs] restored {restored} job(s) from {self.jobs_root}")
 
     @property
     def llm_available(self) -> bool:
@@ -289,6 +297,7 @@ class JobManager:
         )
         with self._jobs_lock:
             self._jobs[job_id] = state
+        self._persist_state(state)
         return state
 
     def get(self, job_id: str) -> Optional[JobState]:
@@ -328,7 +337,73 @@ class JobManager:
         job.final_result = None
         job.error = None
         job.status = JobStatus.RUNNING
+        self._persist_state(job)
         self._executor.submit(self._run_phase_a, job, layout_only)
+
+    def overlay_dims_for_stem(self, job: JobState, stem: str) -> Optional[tuple[float, float]]:
+        """Return (width_mm, height_mm) for a tool's rectified image, or None.
+
+        Used by the server to embed mm dimensions alongside overlay URLs in
+        the /llm_evaluate response so the frontend can convert click
+        coordinates into the same mm frame the LLM uses.
+        """
+        rect = job.output_dir / stem / f"{stem}_rectified.png"
+        if not rect.exists():
+            return None
+        return _rectified_dimensions_mm(rect)
+
+    def generate_overlays(self, job: JobState) -> list[str]:
+        """Render per-tool overlay images without calling any LLM.
+
+        Same overlay output as ``run_llm_evaluate`` produces, but without
+        the Anthropic round-trip — for the manual corrective-click flow
+        where the user picks coordinates themselves. Returns the list of
+        input-image stems for which an overlay was successfully written.
+        """
+        from pic_to_bin.web.overlay import (
+            cap_image_size_to_jpeg,
+            DEFAULT_LLM_IMAGE_MAX_BYTES,
+            generate_overlay_image,
+        )
+
+        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.COMPLETE):
+            raise RuntimeError(
+                f"Job {job.id} not in awaiting_decision or complete "
+                f"(status={job.status.value})"
+            )
+
+        rectified_paths = self._rectified_paths_for(job)
+        if not rectified_paths:
+            raise RuntimeError(
+                "No rectified images found; run Phase A first."
+            )
+
+        stems: list[str] = []
+        with _job_log_capture(job):
+            for rect in rectified_paths:
+                stem = rect.parent.name
+                trace_dxf = rect.with_name(rect.stem + "_trace.dxf")
+                overlay_full = rect.with_name(rect.stem + "_overlay_full.png")
+                overlay_small = rect.with_name(rect.stem + "_overlay.jpg")
+                if not trace_dxf.exists():
+                    continue
+                try:
+                    generate_overlay_image(
+                        rectified_path=rect,
+                        trace_dxf_path=trace_dxf,
+                        output_path=overlay_full,
+                    )
+                    cap_image_size_to_jpeg(
+                        overlay_full, overlay_small,
+                        max_bytes=DEFAULT_LLM_IMAGE_MAX_BYTES,
+                    )
+                    stems.append(stem)
+                except Exception as e:  # noqa: BLE001
+                    self._dispatch_event(job, ProgressEvent(
+                        step="overlay_failed",
+                        message=f"Overlay generation failed for {rect.name}: {e}",
+                    ))
+        return stems
 
     def run_llm_evaluate(
         self,
@@ -362,9 +437,10 @@ class JobManager:
 
         if not self.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY not configured")
-        if job.status != JobStatus.AWAITING_DECISION:
+        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.COMPLETE):
             raise RuntimeError(
-                f"Job {job.id} not in awaiting_decision (status={job.status.value})"
+                f"Job {job.id} not in awaiting_decision or complete "
+                f"(status={job.status.value})"
             )
         if job.layout_result is None:
             raise RuntimeError(f"Job {job.id} has no layout to evaluate")
@@ -502,11 +578,28 @@ class JobManager:
                 fraction=0.0,
             ))
 
+            # Read each rectified image's mm dimensions so the LLM can
+            # emit corrective_points in the overlay's coordinate frame.
+            # The overlay PNG renders the rectified at exact mm scale
+            # (see pic_to_bin.web.overlay.generate_overlay_image), so
+            # the rectified's frame IS the overlay's frame.
+            overlay_dims: list[tuple[float, float]] = []
+            for rect in rectified_paths:
+                d = _rectified_dimensions_mm(rect)
+                if d is not None:
+                    overlay_dims.append(d)
+                else:
+                    # Fall back to (0, 0) so the index alignment with
+                    # rectified_paths stays correct; evaluate_layout
+                    # only uses entries with a positive mm size.
+                    overlay_dims.append((0.0, 0.0))
+
             verdict = evaluate_layout(
                 rectified_paths=overlay_paths,
                 layout_preview_path=preview_path,
                 current_params=dict(job.params),
                 api_key=self.anthropic_api_key,
+                overlay_dimensions_mm=overlay_dims,
             )
 
             self._dispatch_event(job, ProgressEvent(
@@ -522,8 +615,12 @@ class JobManager:
             ))
 
             # Stop conditions: model says ok, or we're not auto-looping,
-            # or there's nothing actionable to apply.
-            if verdict.ok or not auto_loop or not verdict.suggested_params:
+            # or there's nothing actionable to apply (neither numeric
+            # tweaks nor SAM2 corrective clicks).
+            has_actionable = bool(
+                verdict.suggested_params or verdict.corrective_points
+            )
+            if verdict.ok or not auto_loop or not has_actionable:
                 return verdict, iteration, overlay_stems
 
             # Apply suggested params and re-run Phase A in-thread.
@@ -534,11 +631,23 @@ class JobManager:
             ))
             merged = dict(job.params)
             merged.update(verdict.suggested_params)
+            if verdict.corrective_points:
+                merged["sam_corrective_points"] = _merge_corrective_points(
+                    merged.get("sam_corrective_points"),
+                    verdict.corrective_points,
+                    rectified_paths,
+                )
             job.params = merged
             job.layout_result = None
             job.error = None
-            layout_only = not _suggested_params_require_retrace(
-                verdict.suggested_params
+            # Corrective points always require a SAM2 re-trace — no
+            # numeric knob can replay them on a cached mask. Numeric
+            # params follow the existing trace-affecting rule.
+            layout_only = (
+                not verdict.corrective_points
+                and not _suggested_params_require_retrace(
+                    verdict.suggested_params
+                )
             )
             job.status = JobStatus.RUNNING
             self._run_phase_a(job, skip_trace=layout_only)
@@ -592,6 +701,8 @@ class JobManager:
             self._dispatch_event(job, ProgressEvent(
                 step="error", message=str(e), fraction=1.0,
             ))
+        finally:
+            self._persist_state(job)
 
     def _run_phase_b(self, job: JobState) -> None:
         try:
@@ -618,6 +729,8 @@ class JobManager:
             self._dispatch_event(job, ProgressEvent(
                 step="error", message=str(e), fraction=1.0,
             ))
+        finally:
+            self._persist_state(job)
 
     # -- event fan-out (called from worker threads) --------------------------
 
@@ -723,6 +836,146 @@ class JobManager:
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
+    # -- on-disk persistence (for surviving server restarts) -----------------
+
+    def _persist_state(self, job: JobState) -> None:
+        """Snapshot the persistable fields of ``job`` to ``job_state.json``.
+
+        Best-effort: persistence failures are logged but never propagate, so
+        a transient disk hiccup can't break a running pipeline. The worst
+        case is that a restart misses one update and the next save catches
+        up. The on-disk artifacts (layout_preview.png, bin_config.json) are
+        the source of truth for status; this file just carries the params,
+        part_name, and grid summary that aren't otherwise recoverable."""
+        with job._lock:
+            ls = None
+            if job.layout_result:
+                ls = {
+                    "grid_units_x": job.layout_result.get("grid_units_x"),
+                    "grid_units_y": job.layout_result.get("grid_units_y"),
+                }
+            snapshot = {
+                "version": 1,
+                "id": job.id,
+                "status": job.status.value,
+                "params": job.params,
+                "part_name": job.part_name,
+                "created_at": job.created_at,
+                "last_activity": job.last_activity,
+                "input_filenames": [p.name for p in job.input_image_paths],
+                "layout_summary": ls,
+                "error": job.error,
+            }
+        try:
+            job.output_dir.mkdir(parents=True, exist_ok=True)
+            target = job.output_dir / "job_state.json"
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            tmp.replace(target)
+        except Exception as e:  # noqa: BLE001
+            print(f"[jobs] failed to persist state for {job.id}: {e}")
+
+    def _restore_jobs(self) -> int:
+        """Rebuild ``self._jobs`` from on-disk ``job_state.json`` files.
+
+        Status is inferred from the artifacts that actually exist on disk
+        (so a saved status that's out of sync with the file system loses to
+        what's really there). Dirs without a ``job_state.json`` are skipped
+        — they predate this persistence and we can't safely redo them
+        without knowing the original params."""
+        if not self.jobs_root.exists():
+            return 0
+        restored = 0
+        for sub in self.jobs_root.iterdir():
+            if not sub.is_dir():
+                continue
+            state_path = sub / "job_state.json"
+            if not state_path.exists():
+                continue
+            try:
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[jobs] skipping {sub.name}: bad job_state.json ({e})")
+                continue
+
+            job_id = saved.get("id") or sub.name
+            inputs_dir = sub / "inputs"
+            input_paths = [
+                inputs_dir / fn
+                for fn in (saved.get("input_filenames") or [])
+                if (inputs_dir / fn).exists()
+            ]
+
+            layout_preview = sub / "layout_preview.png"
+            combined_dxf = sub / "combined_layout.dxf"
+            bin_config = sub / "bin_config.json"
+
+            layout_result: Optional[dict] = None
+            final_result: Optional[dict] = None
+            error = saved.get("error")
+
+            ls = saved.get("layout_summary") or {}
+            grid_x = ls.get("grid_units_x")
+            grid_y = ls.get("grid_units_y")
+
+            if bin_config.exists() and layout_preview.exists():
+                # Phase B finished successfully.
+                if grid_x is None or grid_y is None:
+                    # Older saves may not have the summary; recover from
+                    # bin_config.json which has the same numbers.
+                    try:
+                        cfg = json.loads(
+                            bin_config.read_text(encoding="utf-8")
+                        )
+                        grid_x = grid_x or cfg.get("grid_x")
+                        grid_y = grid_y or cfg.get("grid_y")
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                status = JobStatus.COMPLETE
+                layout_result = {
+                    "grid_units_x": grid_x,
+                    "grid_units_y": grid_y,
+                    "preview_path": str(layout_preview),
+                    "combined_dxf_path": str(combined_dxf),
+                }
+                final_result = {"bin_config": str(bin_config)}
+            elif layout_preview.exists():
+                # Phase A finished, awaiting user proceed/redo.
+                status = JobStatus.AWAITING_DECISION
+                layout_result = {
+                    "grid_units_x": grid_x,
+                    "grid_units_y": grid_y,
+                    "preview_path": str(layout_preview),
+                    "combined_dxf_path": str(combined_dxf),
+                }
+            else:
+                # No layout artifacts → server died mid-Phase A. Surface
+                # as an error so the user knows to resubmit; downloads
+                # would 404 anyway.
+                status = JobStatus.ERROR
+                error = error or (
+                    "Server restarted while this job was running. "
+                    "Submit again to retry."
+                )
+
+            now = time.time()
+            state = JobState(
+                id=job_id,
+                output_dir=sub,
+                status=status,
+                created_at=saved.get("created_at") or now,
+                last_activity=saved.get("last_activity") or now,
+                params=saved.get("params") or {},
+                input_image_paths=input_paths,
+                layout_result=layout_result,
+                final_result=final_result,
+                error=error,
+                part_name=saved.get("part_name") or "",
+            )
+            self._jobs[job_id] = state
+            restored += 1
+        return restored
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -742,6 +995,64 @@ _TRACE_AFFECTING_PARAMS = {
 def _suggested_params_require_retrace(suggested: dict) -> bool:
     """True iff any of the suggested params would invalidate the cached trace."""
     return any(k in _TRACE_AFFECTING_PARAMS for k in suggested)
+
+
+def _rectified_dimensions_mm(rectified_path: Path) -> Optional[tuple[float, float]]:
+    """Return (width_mm, height_mm) of a rectified PNG via its sidecar JSON.
+
+    Returns None if the sidecar is missing or unparseable. The web overlay
+    image is rendered at the same mm scale as the rectified, so we can
+    use these dimensions verbatim as the overlay's coordinate frame for
+    the LLM.
+    """
+    sidecar = rectified_path.with_suffix(".json")
+    if not sidecar.exists():
+        return None
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        dpi = float(meta.get("effective_dpi") or 0)
+        w_px = float(meta.get("image_width_px") or 0)
+        h_px = float(meta.get("image_height_px") or 0)
+    except (json.JSONDecodeError, ValueError, OSError):
+        return None
+    if dpi <= 0 or w_px <= 0 or h_px <= 0:
+        return None
+    return (w_px / dpi * 25.4, h_px / dpi * 25.4)
+
+
+def _merge_corrective_points(
+    existing: Optional[dict],
+    new_points: list,
+    rectified_paths: list,
+) -> dict:
+    """Merge a verdict's corrective_points into the per-stem persistence dict.
+
+    ``new_points`` is a list of ``{overlay_index, x_mm, y_mm, label, ...}``
+    dicts as parsed by ``llm_check._parse_verdict``. ``overlay_index`` is
+    1-based and indexes into ``rectified_paths`` in the order they were
+    sent to the LLM. The rectified path's parent dir name is the input
+    image's stem — that's the key ``run_pipeline`` expects. Out-of-range
+    indices are dropped silently.
+
+    Existing points for a stem are preserved and the new points are
+    appended (accumulate-across-iterations semantics): a later
+    iteration's clicks add to the SAM2 prompt set rather than replacing
+    earlier ones, so a click that fixed iteration 1's issue keeps
+    working in iteration 2.
+    """
+    out: dict = {k: list(v) for k, v in (existing or {}).items()}
+    for pt in new_points:
+        idx = pt.get("overlay_index")
+        if not isinstance(idx, int) or idx < 1 or idx > len(rectified_paths):
+            continue
+        stem = Path(rectified_paths[idx - 1]).parent.name
+        entry = {
+            "x_mm": float(pt["x_mm"]),
+            "y_mm": float(pt["y_mm"]),
+            "label": int(pt["label"]),
+        }
+        out.setdefault(stem, []).append(entry)
+    return out
 
 
 # The keys that map straight from form params → run_pipeline kwargs.
@@ -765,6 +1076,7 @@ _PIPELINE_PARAM_KEYS = {
     "mask_erode",
     "display_smooth_sigma",
     "sam_model",
+    "sam_corrective_points",
 }
 
 

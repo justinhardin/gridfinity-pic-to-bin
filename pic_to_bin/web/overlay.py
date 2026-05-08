@@ -293,18 +293,33 @@ def generate_overlay_image(
 
     ax.imshow(img, alpha=0.55, extent=(0, w_px, h_px, 0))
 
-    def _plot(group: str, color: str, ls: str, lw: float, label: str):
+    def _plot(
+        group: str, color: str, ls: str, lw: float, label: str,
+        fill_alpha: float = 0.0,
+    ):
         for poly in polygons[group]:
             if len(poly) < 2:
                 continue
             pts = _mm_to_image_pixels(poly, h_px, dpi, straighten_info)
             xs = np.append(pts[:, 0], pts[0, 0])
             ys = np.append(pts[:, 1], pts[0, 1])
-            ax.plot(xs, ys, color=color, linestyle=ls,
-                    linewidth=lw, label=label)
+            if fill_alpha > 0:
+                ax.fill(xs, ys, color=color, alpha=fill_alpha,
+                        label=label)
+                ax.plot(xs, ys, color=color, linestyle=ls, linewidth=lw)
+            else:
+                ax.plot(xs, ys, color=color, linestyle=ls,
+                        linewidth=lw, label=label)
             label = "_nolegend_"  # only first poly per group gets a legend entry
 
-    _plot("inner",     "#e63946", "-",  1.6, "Inner trace (SAM2)")
+    # Fill the inner trace as well as outlining it. Without the fill, the LLM
+    # has misread silhouette concavities (e.g. the gap between open pruning-
+    # shear blades) as topological discontinuities — the unfilled background
+    # showing through a concavity looked to it like two separate polygons.
+    # A translucent red fill makes the tool region unambiguous: one connected
+    # filled blob = one tool; multiple separate blobs = a real merge/split.
+    _plot("inner",     "#e63946", "-",  2.0, "Inner trace (SAM2)",
+          fill_alpha=0.22)
     _plot("tolerance", "#ffa600", "--", 2.4, "Tolerance perimeter (cut)")
     _plot("slot",      "#1d70b8", ":",  1.5, "Finger slot")
 

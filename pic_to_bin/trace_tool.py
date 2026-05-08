@@ -14,6 +14,7 @@ Pipeline:
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -41,7 +42,11 @@ def _get_sam_model(model_name: str = "sam2.1_l.pt"):
     return _sam_model
 
 
-def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
+def segment_tool(
+    image_path: str,
+    sam_model: str = "sam2.1_l.pt",
+    corrective_points: Optional[list[tuple[float, float, int]]] = None,
+) -> np.ndarray:
     """Extract binary mask of the tool from the scanner image using SAM2.
 
     Uses a two-step approach:
@@ -54,6 +59,13 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     Args:
         image_path: Path to the scanner image
         sam_model: SAM2 model weight name (default: sam2.1_l.pt)
+        corrective_points: Optional list of ``(x_px, y_px, label)`` tuples
+            in source-image pixel coordinates. ``label=1`` is a positive
+            click ("this point is tool"), ``label=0`` is a negative click
+            ("this point is background"). Used to nudge SAM2 when the
+            default bbox-only prompt produced a wrong mask (e.g. merged
+            background through a gap between handles). Points outside
+            the image are silently dropped.
 
     Returns:
         Binary mask (uint8, 0 or 255) where 255 = tool
@@ -128,13 +140,40 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     # --- Step 2: SAM2 segmentation ---
     model = _get_sam_model(sam_model)
 
+    # Filter corrective points to those inside the image; SAM2 silently
+    # drops out-of-bounds clicks but the warning is useful for debugging
+    # bad LLM coordinates.
+    pt_xy: list[list[float]] = []
+    pt_labels: list[int] = []
+    if corrective_points:
+        for x, y, lbl in corrective_points:
+            if 0 <= x < w and 0 <= y < h:
+                pt_xy.append([float(x), float(y)])
+                pt_labels.append(int(lbl))
+            else:
+                print(f"  WARNING: corrective point ({x:.0f}, {y:.0f}) "
+                      f"outside image {w}x{h} — dropped")
+
+    sam_kwargs: dict = {"verbose": False}
+    if bbox is not None:
+        sam_kwargs["bboxes"] = [bbox]
+    if pt_xy:
+        # ultralytics SAM groups prompts per object: nest as [[points]]
+        # and [[labels]] so all clicks bind to the single bbox object.
+        sam_kwargs["points"] = [pt_xy]
+        sam_kwargs["labels"] = [pt_labels]
+        print(f"  SAM2 corrective points: "
+              + ", ".join(
+                  f"({p[0]:.0f},{p[1]:.0f})={'+' if l == 1 else '-'}"
+                  for p, l in zip(pt_xy, pt_labels)
+              ))
+
     if bbox is not None:
         print(f"  SAM2 bbox prompt: [{bbox[0]}, {bbox[1]}, "
               f"{bbox[2]}, {bbox[3]}]")
-        results = model(image_path, bboxes=[bbox], verbose=False)
     else:
         print("  SAM2 auto-segmentation (no bbox found from threshold)")
-        results = model(image_path, verbose=False)
+    results = model(image_path, **sam_kwargs)
 
     mask = _extract_best_mask(results, h, w)
 
@@ -157,13 +196,28 @@ def segment_tool(image_path: str, sam_model: str = "sam2.1_l.pt") -> np.ndarray:
     # On bright backgrounds, recover tool regions (dark handles AND saturated
     # colored regions like yellow labels) that SAM2 may exclude. Uses an
     # HSV-based score to find non-background pixels and adds threshold-
-    # connected regions back.
-    mask = _recover_bright_bg_missed(mask, gray, hsv)
+    # connected regions back. Honors negative corrective clicks: any
+    # threshold component containing a negative click is excluded from
+    # the recovery, so the user's "this is background" decision survives.
+    negative_pixels = [(p[0], p[1]) for p, l in zip(pt_xy, pt_labels) if l == 0]
+    mask = _recover_bright_bg_missed(
+        mask, gray, hsv, negative_click_pixels=negative_pixels or None,
+    )
 
     # Refine mask using original image brightness to carve out interior
     # gaps (e.g. handle gaps on pliers) that SAM may fill.
     # Only runs on dark backgrounds (lid-open scanning).
     mask = _refine_mask_with_image(mask, gray)
+
+    # Final word on the mask: re-apply corrective clicks AFTER recovery
+    # and refinement. SAM2 honors negative clicks during inference, but
+    # downstream `_recover_bright_bg_missed` can flood-add a region back
+    # if it threshold-connects to a kept area (e.g. the dim white gap
+    # between two open scissor blades, connected to the blades through
+    # the V-vertex). Carving here makes corrective_points authoritative
+    # regardless of what upstream steps decide.
+    if pt_xy:
+        mask = _apply_corrective_clicks(mask, pt_xy, pt_labels, bbox)
 
     return mask
 
@@ -216,7 +270,8 @@ def _extract_best_mask(results, img_h: int, img_w: int) -> np.ndarray:
 
 
 def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray,
-                              hsv: np.ndarray) -> np.ndarray:
+                              hsv: np.ndarray,
+                              negative_click_pixels: Optional[list] = None) -> np.ndarray:
     """Recover tool regions that SAM2 missed on bright backgrounds.
 
     On white/bright backgrounds (e.g. white paper under the scanner lid),
@@ -290,6 +345,48 @@ def _recover_bright_bg_missed(mask: np.ndarray, gray: np.ndarray,
     for lid in overlapping:
         component = labels == lid
         recovery |= (component & ~tool_region)
+
+    # Honor user-provided negative corrective clicks: suppress any
+    # recovery BLOB (connected region of would-be-added pixels) that
+    # contains or sits near a negative click. Operating on connected
+    # components of the recovery itself — rather than the upstream
+    # threshold components — keeps the suppression surgical: the
+    # Fiskars V-gap is one recovery blob, the thin shadow rim around
+    # the rest of the tool is a separate blob, so a click in the gap
+    # vetoes only the gap. We dilate clicks by a small radius first
+    # so a click that lands a few pixels off the recovery blob still
+    # selects it.
+    if negative_click_pixels and np.any(recovery):
+        h_img, w_img = mask.shape
+        # Click-tolerance disk. Small enough that an errant click
+        # outside the blob doesn't accidentally veto unrelated recovery
+        # blobs; large enough that a near-miss still hits the intended
+        # one. ~1.5 mm at 400 dpi / ~3 mm at 200 dpi.
+        radius_px = 20
+        click_img = np.zeros((h_img, w_img), dtype=np.uint8)
+        any_click = False
+        for cx, cy in negative_click_pixels:
+            ix, iy = int(round(cx)), int(round(cy))
+            if 0 <= ix < w_img and 0 <= iy < h_img:
+                click_img[iy, ix] = 255
+                any_click = True
+        if any_click:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1)
+            )
+            click_disks = cv2.dilate(click_img, kernel) > 0
+            n_rec, rec_labels = cv2.connectedComponents(
+                recovery.astype(np.uint8)
+            )
+            vetoed_ids = set(np.unique(rec_labels[click_disks]).tolist())
+            vetoed_ids.discard(0)
+            if vetoed_ids:
+                veto_mask = np.isin(rec_labels, list(vetoed_ids))
+                suppressed_px = int(np.count_nonzero(veto_mask))
+                recovery &= ~veto_mask
+                print(f"  Bright-bg recovery: vetoed {len(vetoed_ids)} "
+                      f"recovery blob(s) ({suppressed_px} px) by negative "
+                      f"corrective click(s)")
 
     added = int(np.count_nonzero(recovery))
     if added == 0:
@@ -439,6 +536,89 @@ def _refine_mask_with_image(mask: np.ndarray, gray: np.ndarray,
           f"(threshold={dark_threshold})")
 
     return refined
+
+
+def _apply_corrective_clicks(
+    mask: np.ndarray,
+    pt_xy: list,
+    pt_labels: list,
+    bbox: Optional[list],
+    max_negative_fraction: float = 0.25,
+    max_positive_fraction: float = 0.05,
+) -> np.ndarray:
+    """Apply corrective clicks as the final mask word.
+
+    For each negative click (label=0): find the connected component of
+    the FOREGROUND mask containing that pixel and remove it. Skipped if
+    the component is larger than ``max_negative_fraction`` of the
+    bbox-or-image area — guard against an LLM click that lands on the
+    main tool body and would otherwise delete the whole mask.
+
+    For each positive click (label=1): find the connected component of
+    the BACKGROUND containing that pixel and add it. Skipped if the
+    component is larger than ``max_positive_fraction`` of the image area —
+    a click on the actual paper/scanner background would otherwise fill
+    everything.
+
+    Runs after SAM2 + recovery + refinement so it overrides any earlier
+    decision. Idempotent: re-applying the same clicks to the same
+    initial mask yields the same result.
+    """
+    if not pt_xy:
+        return mask
+
+    h, w = mask.shape
+    image_area = h * w
+    if bbox is not None:
+        bx, by, bx2, by2 = bbox
+        bbox_area = max(1, (bx2 - bx) * (by2 - by))
+    else:
+        bbox_area = image_area
+    fg_size_cap = int(max_negative_fraction * bbox_area)
+    bg_size_cap = int(max_positive_fraction * image_area)
+
+    out = mask.copy()
+    for (x, y), lbl in zip(pt_xy, pt_labels):
+        ix, iy = int(round(x)), int(round(y))
+        if not (0 <= ix < w and 0 <= iy < h):
+            continue
+
+        if lbl == 0:
+            # Negative click: drop the foreground component containing it.
+            if out[iy, ix] == 0:
+                print(f"  Corrective ({ix},{iy})=- : already background, skipped")
+                continue
+            n, labels = cv2.connectedComponents((out > 0).astype(np.uint8))
+            cid = labels[iy, ix]
+            comp_size = int(np.count_nonzero(labels == cid))
+            if comp_size > fg_size_cap:
+                print(f"  Corrective ({ix},{iy})=- : component is "
+                      f"{comp_size} px ({100*comp_size/bbox_area:.0f}% "
+                      f"of bbox) — exceeds {100*max_negative_fraction:.0f}% "
+                      f"safety cap, skipped")
+                continue
+            out[labels == cid] = 0
+            print(f"  Corrective ({ix},{iy})=- : carved {comp_size} px "
+                  f"foreground component")
+        else:
+            # Positive click: fill the background component containing it.
+            if out[iy, ix] != 0:
+                print(f"  Corrective ({ix},{iy})=+ : already foreground, skipped")
+                continue
+            n, labels = cv2.connectedComponents((out == 0).astype(np.uint8))
+            cid = labels[iy, ix]
+            comp_size = int(np.count_nonzero(labels == cid))
+            if comp_size > bg_size_cap:
+                print(f"  Corrective ({ix},{iy})=+ : component is "
+                      f"{comp_size} px ({100*comp_size/image_area:.0f}% "
+                      f"of image) — exceeds {100*max_positive_fraction:.0f}% "
+                      f"safety cap, skipped")
+                continue
+            out[labels == cid] = 255
+            print(f"  Corrective ({ix},{iy})=+ : filled {comp_size} px "
+                  f"background component")
+
+    return out
 
 
 def _smooth_contour_coords(contour: np.ndarray, sigma: float) -> np.ndarray:

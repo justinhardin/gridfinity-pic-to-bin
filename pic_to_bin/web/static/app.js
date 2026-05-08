@@ -13,7 +13,7 @@ const FORM_DEFAULTS = {
   part_name: "",
   paper_size: "legal",
   tolerance: 0.0,
-  axial_tolerance: 1.0,
+  axial_tolerance: "",  // empty = "auto" (taper-based heuristic on the backend)
   tool_taper: "top",
   gap: 3.0,
   bin_margin: 0.0,
@@ -95,12 +95,13 @@ const FIELD_INFO = {
   },
   axial_tolerance: {
     title: "Axial tolerance (mm)",
-    hint: "Extra clearance only at the tool's tips, not its sides.",
+    hint: "Leave blank for auto. Extra clearance at the tool's tips, not its sides.",
     body: [
       "Extra clearance pushed onto each end of the tool along its long (principal) axis only. The perpendicular extent is unchanged.",
-      "The SAM2 segmentation tends to under-detect tapered or thin tool tips, so the trace is shorter than the actual tool. Adding uniform tolerance to fix this would make the wider sections too loose. This setting fixes only the ends.",
-      "Default 1 mm pushes each end outward by 1 mm (so the pocket is 2 mm longer overall along the axis). Increase if tool tips still don't fit; set to 0 for fully uniform tolerance.",
-      "Caveat: this is a linear stretch in the rotated frame, so any features along the axis stretch slightly too. Fine for typical hand tools, less ideal for tools with internal axis-parallel features (rare).",
+      "Why this exists: SAM2 segmentation under-detects tapered or thin tool tips, so the raw trace is shorter than the real tool. Adding *uniform* tolerance to compensate makes the wider sections too loose; this setting fixes only the ends.",
+      "Default 'auto' (blank field) computes a value from the trace: a square-ended tool (e.g. ruler) gets ~0.5 mm; a sharply tapered tool (e.g. shears) gets up to ~3 mm. Formula: 0.5 + 0.014 × axial_length × taper, where taper = 1 − tip_width / body_width.",
+      "Override by typing a number — e.g. 1.0 to push each end outward by 1 mm regardless of shape. Set to 0 for fully uniform tolerance.",
+      "Caveat: the stretch is linear in the rotated frame, so any features along the axis stretch slightly too. Fine for typical hand tools, less ideal for tools with internal axis-parallel features (rare).",
     ],
   },
   gap: {
@@ -573,6 +574,13 @@ class PicApp extends LitElement {
     this.errorMessage = null;
     this._seenLayoutReady = false;
     this._seenComplete = false;
+    // _onComplete closes the EventSource on terminal status. When the user
+    // redoes from a `complete` job, the channel is gone and layout_ready/
+    // complete events from the new run wouldn't reach the UI. Reopen here;
+    // the server replays event_log on subscribe so we don't miss anything.
+    if (!this._eventSource) {
+      this._connectEvents(this.jobId);
+    }
     const res = await fetch(`/jobs/${this.jobId}/redo`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -807,7 +815,7 @@ class PicForm extends LitElement {
         <h3 class="advanced-subhead">Tool fitting</h3>
         <div class="field-row">
           ${this._renderField("tolerance", "number", { step: 0.1 })}
-          ${this._renderField("axial_tolerance", "number", { step: 0.1 })}
+          ${this._renderField("axial_tolerance", "number", { step: 0.1, placeholder: "auto" })}
         </div>
         <div class="field-row">
           ${this._renderField("gap", "number", { step: 0.1 })}
@@ -1266,11 +1274,15 @@ class PicPreview extends LitElement {
     llmBusy: { state: true },
     llmVerdict: { state: true },
     llmIterations: { state: true },
-    llmOverlays: { state: true },   // [{stem, url}] returned by /llm_evaluate
+    llmOverlays: { state: true },   // [{stem, url, width_mm, height_mm}] returned by /llm_evaluate
     llmError: { state: true },
     llmAutoLoop: { state: true },
     llmMaxIterations: { state: true },
     showAdvanced: { state: true },
+    correctivePoints: { state: true }, // { stem: [{x_mm, y_mm, label}], ... }
+    correctiveMode: { state: true },   // "negative" | "positive"
+    overlaysBusy: { state: true },     // true while POST /overlays is in flight
+    correctiveError: { state: true },  // human-readable error to surface near the controls
   };
   createRenderRoot() { return this; }
 
@@ -1288,6 +1300,10 @@ class PicPreview extends LitElement {
     this.llmAutoLoop = false;
     this.llmMaxIterations = 3;
     this.showAdvanced = false;
+    this.correctivePoints = {};
+    this.correctiveMode = "negative";
+    this.overlaysBusy = false;
+    this.correctiveError = null;
   }
 
   // pic-app sets `currentParams` and `layoutInfo` before each render. When the
@@ -1300,6 +1316,18 @@ class PicPreview extends LitElement {
       this.llmIterations = 0;
       this.llmOverlays = [];
       this.llmError = null;
+    }
+    // Re-seed corrective points from the canonical applied state ONLY
+    // when a fresh layout lands (artifactKey bumps) AND that fresh state
+    // explicitly includes a sam_corrective_points dict. We never clear
+    // local clicks on a redo whose params didn't touch corrective points
+    // (e.g. a "Apply suggested tolerance" redo) — the user's pending
+    // clicks should survive that round-trip.
+    if (changed.has("artifactKey")) {
+      const fromServer = this.currentParams?.sam_corrective_points;
+      if (fromServer && typeof fromServer === "object") {
+        this.correctivePoints = JSON.parse(JSON.stringify(fromServer));
+      }
     }
   }
 
@@ -1353,6 +1381,7 @@ class PicPreview extends LitElement {
       ` : nothing}
 
       ${this.llmVerdict ? this._renderVerdictCard() : nothing}
+      ${this._renderStandaloneCorrectiveCard()}
 
       <div class="card">
         <h2>Looks good?</h2>
@@ -1373,6 +1402,13 @@ class PicPreview extends LitElement {
                 : html`Check or refine with LLM`}
             </button>
           ` : nothing}
+          <button class="secondary"
+                  ?disabled=${this.llmBusy || this.running || this.overlaysBusy}
+                  @click=${this._onShowOverlaysForClicks}>
+            ${this.overlaysBusy
+              ? html`Loading overlays…`
+              : html`Add corrective clicks${this.llmAvailable ? ' (no LLM)' : ''}`}
+          </button>
         </div>
         ${this._renderAdvancedToggle()}
       </div>
@@ -1418,6 +1454,221 @@ class PicPreview extends LitElement {
     `;
   }
 
+  // -------- Corrective-points click UI --------------------------------------
+
+  _correctiveTotal() {
+    return Object.values(this.correctivePoints || {})
+      .reduce((acc, list) => acc + (Array.isArray(list) ? list.length : 0), 0);
+  }
+
+  _renderClickableOverlay(o, cacheKey) {
+    const stem = o.stem;
+    const wMm = Number(o.width_mm) || 0;
+    const hMm = Number(o.height_mm) || 0;
+    const clickable = wMm > 0 && hMm > 0;
+    const points = (this.correctivePoints[stem] || []);
+    return html`
+      <figure class="overlay-figure">
+        <div class="overlay-clicker ${clickable ? '' : 'no-coord-frame'}"
+             title=${clickable
+               ? `Click to add a ${this.correctiveMode} corrective point. Frame: ${wMm.toFixed(1)} × ${hMm.toFixed(1)} mm`
+               : "Overlay mm dimensions unavailable; clicking disabled."}
+             @click=${clickable ? (e) => this._onOverlayClick(e, stem, wMm, hMm) : null}>
+          <img src=${`${o.url}?v=${cacheKey}`} alt="Overlay for ${stem}">
+          ${points.map((p, i) => {
+            const xPct = (p.x_mm / wMm) * 100;
+            const yPct = (p.y_mm / hMm) * 100;
+            return html`
+              <span class="click-dot ${p.label === 0 ? 'negative' : 'positive'}"
+                    style="left:${xPct}%; top:${yPct}%"
+                    title="${p.label === 0 ? 'Negative' : 'Positive'} click at (${p.x_mm.toFixed(1)}, ${p.y_mm.toFixed(1)}) mm — click to remove"
+                    @click=${(e) => { e.stopPropagation(); this._onRemovePoint(stem, i); }}>
+                ${p.label === 0 ? '−' : '+'}
+              </span>
+            `;
+          })}
+        </div>
+        <figcaption>
+          ${stem}
+          ${clickable ? html`<span class="overlay-dims-hint">(${wMm.toFixed(0)} × ${hMm.toFixed(0)} mm)</span>` : nothing}
+        </figcaption>
+      </figure>
+    `;
+  }
+
+  _onOverlayClick = (e, stem, wMm, hMm) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const xRatio = (e.clientX - rect.left) / rect.width;
+    const yRatio = (e.clientY - rect.top) / rect.height;
+    if (xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) return;
+    const label = this.correctiveMode === "positive" ? 1 : 0;
+    const newPoint = {
+      x_mm: +(xRatio * wMm).toFixed(2),
+      y_mm: +(yRatio * hMm).toFixed(2),
+      label,
+    };
+    const list = this.correctivePoints[stem] ? [...this.correctivePoints[stem]] : [];
+    list.push(newPoint);
+    this.correctivePoints = { ...this.correctivePoints, [stem]: list };
+  };
+
+  _onRemovePoint = (stem, index) => {
+    const list = (this.correctivePoints[stem] || []).filter((_, i) => i !== index);
+    const next = { ...this.correctivePoints };
+    if (list.length === 0) delete next[stem]; else next[stem] = list;
+    this.correctivePoints = next;
+  };
+
+  _renderCorrectiveControls(overlays) {
+    const total = this._correctiveTotal();
+    const haveCoordFrame = overlays.some(o => Number(o.width_mm) > 0 && Number(o.height_mm) > 0);
+    if (!haveCoordFrame) return nothing;
+    const submitting = this.running;
+    return html`
+      <div class="corrective-controls">
+        <p class="hint">
+          Click on an overlay to add a corrective click for SAM2. Use
+          <strong>negative</strong> on a region wrongly included in the inner
+          trace (e.g. background between handles), <strong>positive</strong>
+          on a tool region the trace missed. Click an existing dot to remove
+          it.
+        </p>
+        <div class="corrective-row">
+          <div class="corrective-mode" role="group" aria-label="Click mode">
+            <button class="mode-btn negative ${this.correctiveMode === 'negative' ? 'active' : ''}"
+                    type="button"
+                    @click=${() => this.correctiveMode = 'negative'}>
+              − Negative (not tool)
+            </button>
+            <button class="mode-btn positive ${this.correctiveMode === 'positive' ? 'active' : ''}"
+                    type="button"
+                    @click=${() => this.correctiveMode = 'positive'}>
+              + Positive (is tool)
+            </button>
+          </div>
+          <div class="corrective-actions">
+            <span class="corrective-count">
+              ${total === 0 ? "no clicks yet" : `${total} click${total === 1 ? "" : "s"} pending`}
+            </span>
+            <button class="secondary"
+                    type="button"
+                    ?disabled=${total === 0 || this.llmBusy || this.running}
+                    @click=${() => this.correctivePoints = {}}>
+              Clear
+            </button>
+            <button class="primary"
+                    type="button"
+                    ?disabled=${total === 0 || this.llmBusy || submitting}
+                    @click=${this._onApplyCorrective}>
+              ${submitting
+                ? "Submitting…"
+                : `Apply ${total} corrective click${total === 1 ? "" : "s"} & re-run`}
+            </button>
+          </div>
+        </div>
+        ${this.correctiveError ? html`
+          <p class="hint error-hint">${this.correctiveError}</p>
+        ` : nothing}
+      </div>
+    `;
+  }
+
+  _onApplyCorrective = () => {
+    if (this._correctiveTotal() === 0) return;
+    this.correctiveError = null;
+    // Send the FULL current set (not a delta) so the backend's
+    // sam_corrective_points dict is the canonical applied state. The
+    // server-side redo handler force-overrides layout_only=False when
+    // sam_corrective_points is present, but we send false here too so
+    // the round-trip is explicit.
+    const detail = {
+      params: { sam_corrective_points: this.correctivePoints },
+      layoutOnly: false,
+    };
+    console.log("[corrective] dispatching redo", detail);
+    this.dispatchEvent(new CustomEvent("redo", {
+      detail,
+      bubbles: true,
+      composed: true,
+    }));
+    // dispatchEvent is synchronous: if pic-app's @redo listener fired,
+    // its handler already ran the synchronous body of _onRedo (which
+    // sets pic-app.running = true) before dispatchEvent returned. If
+    // pic-app.running is still false here, the listener didn't catch
+    // the event — fall back to invoking _onRedo directly so the user
+    // never sees a silent no-op.
+    const picApp = document.querySelector("pic-app");
+    if (picApp && !picApp.running) {
+      console.warn("[corrective] redo event not caught; invoking pic-app._onRedo directly");
+      if (typeof picApp._onRedo === "function") {
+        picApp._onRedo({ detail });
+      } else {
+        this.correctiveError =
+          "Could not trigger re-run — pic-app handler missing. Try a hard reload (Ctrl-Shift-R).";
+      }
+    }
+  };
+
+  _onShowOverlaysForClicks = async () => {
+    if (this.overlaysBusy || this.llmBusy || this.running) return;
+    this.overlaysBusy = true;
+    this.correctiveError = null;
+    try {
+      const res = await fetch(`/jobs/${this.jobId}/overlays`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      if (!res.ok) {
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const list = Array.isArray(data.overlays) ? data.overlays : [];
+      if (list.length === 0) {
+        throw new Error("No overlays were generated for this job.");
+      }
+      this.llmOverlays = list;
+    } catch (err) {
+      this.correctiveError = err.message || String(err);
+    } finally {
+      this.overlaysBusy = false;
+    }
+  };
+
+  _renderStandaloneCorrectiveCard() {
+    // Only show when overlays exist but no verdict — otherwise the
+    // controls live inside the verdict card and we'd be rendering
+    // them twice.
+    if (this.llmVerdict) return nothing;
+    if (this.correctiveError && (!this.llmOverlays || this.llmOverlays.length === 0)) {
+      return html`
+        <div class="card error-card">
+          <p class="hint"><strong>Couldn't load overlays.</strong> ${this.correctiveError}</p>
+        </div>
+      `;
+    }
+    if (!this.llmOverlays || this.llmOverlays.length === 0) return nothing;
+    const k = this.artifactKey;
+    return html`
+      <div class="card corrective-card">
+        <h2>Corrective clicks</h2>
+        <p class="hint">
+          Add SAM2 corrective clicks on the per-tool overlays below. Each
+          click stays local until you press Apply — no LLM call is made.
+        </p>
+        <div class="overlay-grid">
+          ${this.llmOverlays.map(o => this._renderClickableOverlay(o, k))}
+        </div>
+        ${this._renderCorrectiveControls(this.llmOverlays)}
+        ${this.correctiveError ? html`
+          <p class="hint error-hint">${this.correctiveError}</p>
+        ` : nothing}
+      </div>
+    `;
+  }
+
+  // -------- Verdict card --------------------------------------------------
+
   _renderVerdictCard() {
     const verdict = this.llmVerdict;
     const ok = !!verdict.ok;
@@ -1447,15 +1698,9 @@ class PicPreview extends LitElement {
               = finger slot.
             </p>
             <div class="overlay-grid">
-              ${overlays.map(o => html`
-                <figure class="overlay-figure">
-                  <a href=${`${o.url}?v=${k}`} target="_blank" rel="noopener">
-                    <img src=${`${o.url}?v=${k}`} alt="Overlay for ${o.stem}">
-                  </a>
-                  <figcaption>${o.stem}</figcaption>
-                </figure>
-              `)}
+              ${overlays.map(o => this._renderClickableOverlay(o, k))}
             </div>
+            ${this._renderCorrectiveControls(overlays)}
           </div>
         ` : nothing}
         <p class="verdict-reasoning">${verdict.reasoning || "(no reasoning provided)"}</p>
@@ -1506,6 +1751,16 @@ class PicPreview extends LitElement {
     this.llmVerdict = null;
     this.llmIterations = 0;
     this.llmOverlays = [];
+    // Auto-loop fires internal Phase A redos that emit layout_ready /
+    // progress events. From a `complete` job the SSE channel was closed
+    // by _onComplete; reopen so those events reach the UI and the
+    // layout-preview cache-busts after each iteration.
+    const picApp = document.querySelector("pic-app");
+    if (this.llmAutoLoop && picApp && !picApp._eventSource) {
+      picApp._connectEvents(this.jobId);
+      picApp._seenLayoutReady = false;
+      picApp._seenComplete = false;
+    }
     try {
       const res = await fetch(`/jobs/${this.jobId}/llm_evaluate`, {
         method: "POST",

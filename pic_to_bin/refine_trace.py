@@ -270,7 +270,7 @@ def refine_trace(
     dpi: int = 200,
     clearance_mm: float = 0.0,
     tolerance_mm: float = 0.0,
-    axial_tolerance_mm: float = 0.0,
+    axial_tolerance_mm=0.0,  # float or "auto"
     alphamax: float = 1.2,
     turdsize: int = 50,
     opttolerance: float = 2.0,
@@ -285,6 +285,7 @@ def refine_trace(
     tool_taper: str = "top",
     finger_slots: bool = True,
     display_smooth_sigma_mm: float = 2.5,
+    sam_corrective_points=None,
 ) -> dict:
     """Run trace_tool iteratively, adjusting cleanup params to preserve concavities.
 
@@ -321,7 +322,11 @@ def refine_trace(
 
     # Step 1: Segmentation (runs once)
     print("Step 1: Segmentation...")
-    raw_mask = segment_tool(str(image_path), sam_model=sam_model)
+    raw_mask = segment_tool(
+        str(image_path),
+        sam_model=sam_model,
+        corrective_points=sam_corrective_points,
+    )
 
     # Save raw mask (original, pre-erosion — useful for debugging)
     raw_mask_path = output_dir / f"{stem}_raw_mask.png"
