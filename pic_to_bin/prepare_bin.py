@@ -45,6 +45,47 @@ SLOT_FLOOR_CLEARANCE_MM = 1.0
 DECK_INSET_MM = 2.0  # distance inside lip perimeter for deck lowering
 
 
+def compute_auto_height_units(tool_heights, height_units_override=None):
+    """Gridfinity height units (U) the bin will use, or None if undetermined.
+
+    Mirrors the auto-sizing in ``build_config``: pick the smallest U such that
+    the body above the floor (U×7 − base profile − 1 mm pocket floor) fits
+    the tallest tool. ``height_units_override`` short-circuits the calculation
+    so a manual override surfaces consistently.
+    """
+    if height_units_override is not None:
+        try:
+            return int(height_units_override)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(tool_heights, (int, float)):
+        max_h = float(tool_heights)
+    elif isinstance(tool_heights, dict):
+        vals = []
+        for k, v in tool_heights.items():
+            if k == "default":
+                continue
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        if not vals:
+            d = tool_heights.get("default")
+            if d is None:
+                return None
+            try:
+                max_h = float(d)
+            except (TypeError, ValueError):
+                return None
+        else:
+            max_h = max(vals)
+    else:
+        return None
+    FLOOR_MIN_MM = 1.0
+    min_bin_height = max_h + FLOOR_MIN_MM + BASE_PROFILE_HEIGHT_MM
+    return max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
+
+
 def bin_body_height_mm(height_units: int) -> float:
     """Body extrusion height above the bin floor (z=0), in mm.
 

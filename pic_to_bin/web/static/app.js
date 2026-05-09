@@ -1420,7 +1420,7 @@ class PicPreview extends LitElement {
       <div class="card">
         <h2>Layout preview</h2>
         ${this.layoutInfo ? html`
-          <p class="hint">Bin: ${this.layoutInfo.grid_units_x} × ${this.layoutInfo.grid_units_y} gridfinity units</p>
+          <p class="hint">Bin: ${this.layoutInfo.grid_units_x} L × ${this.layoutInfo.grid_units_y} W${this.layoutInfo.grid_units_z != null ? html` × ${this.layoutInfo.grid_units_z} H` : nothing} gridfinity units</p>
         ` : nothing}
         ${url ? html`<img class="preview-img" src=${`${url}?v=${k}`}>` : nothing}
       </div>

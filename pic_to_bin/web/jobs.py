@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pic_to_bin.pipeline import ProgressEvent, run_pipeline
+from pic_to_bin.prepare_bin import compute_auto_height_units
 
 
 class JobStatus(str, Enum):
@@ -199,6 +200,7 @@ class JobState:
             "error": self.error,
             "grid_units_x": (self.layout_result or {}).get("grid_units_x"),
             "grid_units_y": (self.layout_result or {}).get("grid_units_y"),
+            "grid_units_z": self._summary_height_units(),
             "artifacts": self._artifact_urls(),
             # Surface input filenames + params + part_name so the frontend
             # can repopulate the form when resuming a job via ?job=<uuid>.
@@ -206,6 +208,17 @@ class JobState:
             "params": dict(self.params),
             "part_name": self.part_name,
         }
+
+    def _summary_height_units(self) -> Optional[int]:
+        if not self.layout_result:
+            return None
+        cached = self.layout_result.get("grid_units_z")
+        if cached is not None:
+            return cached
+        return compute_auto_height_units(
+            self.params.get("tool_heights"),
+            self.params.get("height_units"),
+        )
 
     def _artifact_urls(self) -> dict[str, str]:
         urls: dict[str, str] = {}
