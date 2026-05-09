@@ -173,6 +173,24 @@ def _apply_abs_white(body) -> bool:
 # Bin body
 # ---------------------------------------------------------------------------
 
+def _bin_body_height_mm(config):
+    """Body extrusion height (mm) above the bin floor (z=0).
+
+    Per the gridfinity spec, U×7 mm is the bin's labelled height
+    (excluding the lip) and includes the base region. The base
+    profile pads sit below z=0 (z = −BASE_PROFILE_HEIGHT_MM up to
+    z = 0), so the body proper extrudes from z=0 to U×7 − base_h —
+    landing the lip's bottom at the standard rim height and the
+    pads' bottom at z = −5 mm. Older builds extruded the body to
+    U×7 above z=0, which made bins 5 mm too tall.
+    """
+    return max(
+        1.0,
+        config["height_units"] * 7.0
+        - config.get("base_profile_height_mm", 5.0),
+    )
+
+
 def _effective_bin_top_z_cm(config):
     """Z height (cm) of the bin body's top face, accounting for the
     deck-lowering shortcut applied when stacking lips are disabled.
@@ -186,7 +204,7 @@ def _effective_bin_top_z_cm(config):
     the body height so the resulting print has a flat top at the deck
     level rather than a wall sticking up around the pocket.
     """
-    bin_d = mm(config["height_units"] * 7.0)
+    bin_d = mm(_bin_body_height_mm(config))
     if not config.get("stacking_lip", True):
         lowering = mm(config.get("deck_lowering_mm", 0) or 0)
         if lowering > 0:
@@ -268,7 +286,7 @@ def fillet_outer_corners(root_comp, config):
 def create_stacking_lip(root_comp, config):
     bin_w = mm(config["bin_width_mm"])
     bin_h = mm(config["bin_height_mm"])
-    bin_d = mm(config["height_units"] * 7.0)
+    bin_d = mm(_bin_body_height_mm(config))
     lip_h = mm(LIP_HEIGHT_MM)
     lip_top_z = bin_d + lip_h
 
@@ -427,7 +445,7 @@ def lower_deck(root_comp, config):
 
     bin_w = mm(config["bin_width_mm"])
     bin_h = mm(config["bin_height_mm"])
-    bin_d = mm(config["height_units"] * 7.0)
+    bin_d = mm(_bin_body_height_mm(config))
     wall_t = mm(config.get("wall_thickness_mm", 1.6))
     deck_inset = mm(config.get("deck_inset_mm", 2.0))
     inset = wall_t + deck_inset

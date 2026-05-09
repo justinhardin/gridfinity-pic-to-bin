@@ -29,11 +29,33 @@ HEIGHT_UNIT_MM = 7.0
 WALL_THICKNESS_MM = 1.6
 FLOOR_THICKNESS_MM = 1.2
 CLEARANCE_MM = 0.5
-STACKING_LIP_HEIGHT_MM = 2.6
+# Per the gridfinity spec, the standard stacking lip is 3.8 mm (some
+# generators use 4.4 mm for a slightly chunkier profile); we match the
+# Fusion-side value in _bin_builder.py.
+STACKING_LIP_HEIGHT_MM = 4.4
 THIN_WALL_THRESHOLD_MM = 2.0
-BASE_PROFILE_HEIGHT_MM = 2.6
+# Base profile height (the rounded square pads + chamfers below z=0).
+# The bottom of the pads is at z = -BASE_PROFILE_HEIGHT_MM. Per the
+# gridfinity spec, this 5 mm is part of the U×7 bin height — i.e., a
+# 3h bin's total external height (no lip) is U×7 = 21 mm, of which the
+# bottom 5 mm is the base region and the remaining 16 mm is the body
+# above the floor. Earlier we used 2.6 here, which was wrong.
+BASE_PROFILE_HEIGHT_MM = 5.0
 SLOT_FLOOR_CLEARANCE_MM = 1.0
 DECK_INSET_MM = 2.0  # distance inside lip perimeter for deck lowering
+
+
+def bin_body_height_mm(height_units: int) -> float:
+    """Body extrusion height above the bin floor (z=0), in mm.
+
+    Per the gridfinity spec, U×7 mm is the total external bin height
+    (excluding the lip) and includes both the base region and the body
+    above it. Subtracting the base profile height gives the body height
+    that should be extruded from z=0 upward — so the lip sits on top at
+    U×7 − 5 + lip_h, and pads below z=0 fill in to reach the labelled
+    U×7 mm total.
+    """
+    return max(1.0, height_units * HEIGHT_UNIT_MM - BASE_PROFILE_HEIGHT_MM)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +190,12 @@ def compute_bin_params(grid_x: int, grid_y: int,
     """Calculate bin dimensions from gridfinity parameters.
 
     Returns a dict with all physical dimensions in mm.
+
+    ``bin_depth_mm`` is the standard gridfinity unit-count height
+    (U×7), i.e. the total external height excluding the lip. It is
+    the canonical "Nh" height of the bin. ``bin_body_height_mm`` is
+    the actual body extrusion above z=0; the remaining 5 mm of the
+    U×7 lives in the base profile pads below z=0.
     """
     return {
         "grid_x": grid_x,
@@ -176,12 +204,14 @@ def compute_bin_params(grid_x: int, grid_y: int,
         "bin_width_mm": grid_x * GRID_UNIT_MM,
         "bin_height_mm": grid_y * GRID_UNIT_MM,
         "bin_depth_mm": height_units * HEIGHT_UNIT_MM,
+        "bin_body_height_mm": bin_body_height_mm(height_units),
         "inner_width_mm": grid_x * GRID_UNIT_MM - 2 * CLEARANCE_MM,
         "inner_height_mm": grid_y * GRID_UNIT_MM - 2 * CLEARANCE_MM,
         "wall_thickness_mm": WALL_THICKNESS_MM,
         "floor_thickness_mm": FLOOR_THICKNESS_MM,
         "clearance_mm": CLEARANCE_MM,
         "stacking_lip_height_mm": STACKING_LIP_HEIGHT_MM,
+        "base_profile_height_mm": BASE_PROFILE_HEIGHT_MM,
     }
 
 
@@ -336,15 +366,18 @@ def build_config(layout: dict, tool_heights: dict | float,
     FLOOR_MIN_MM = 1.0  # solid floor below pocket — pocket sits this low
 
     # Auto-calculate height if not specified.
-    # Pocket sits as low as possible (1mm above bin floor), so the bin only
-    # needs to be tall enough to fit the tallest tool plus that 1mm floor,
-    # rounded up to the nearest gridfinity height unit.
+    # Pocket usable depth is body-above-floor minus the 1 mm pocket floor;
+    # body-above-floor is U×7 − BASE_PROFILE_HEIGHT_MM (the rest of the U×7
+    # lives in the base pads below the floor). So we need the smallest U
+    # such that U×7 − BASE_PROFILE_HEIGHT_MM − 1 ≥ tool_height.
     if height_units is None:
-        min_bin_height = max(tool_height_values) + FLOOR_MIN_MM
+        min_bin_height = (
+            max(tool_height_values) + FLOOR_MIN_MM + BASE_PROFILE_HEIGHT_MM
+        )
         height_units = max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
 
     bin_params = compute_bin_params(grid_x, grid_y, height_units)
-    bin_d = height_units * HEIGHT_UNIT_MM
+    bin_d = bin_params["bin_body_height_mm"]
 
     # Compute pocket depths (distance from bin top down to pocket floor at 1mm)
     pocket_depths = [bin_d - FLOOR_MIN_MM for _ in tool_height_values]
