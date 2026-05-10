@@ -79,31 +79,36 @@ def segment_tool(
     h, w = gray.shape
 
     # --- Step 1: Find approximate tool location ---
-    # Background detection from corners (gray is fine here — we only need to
-    # know if the surround is light or dark to pick the right "non-bg" score).
+    # Score each pixel by its Lab-space distance from the median corner
+    # colour. Lab is perceptually uniform and the distance metric works
+    # for any background — white scanner paper (low distance for white,
+    # high for any tool), lid-open dark scans, AND saturated chroma-key
+    # backgrounds (e.g. green template). The earlier gray-Otsu approach
+    # picked one of two score formulas based on whether the corner gray
+    # was bright or dark and silently inverted on a green page whose
+    # gray landed in the dark branch — see history before 2026-05-10.
     margin = min(10, h // 20, w // 20)
-    corners = np.concatenate([
-        gray[:margin, :margin].ravel(),
-        gray[:margin, -margin:].ravel(),
-        gray[-margin:, :margin].ravel(),
-        gray[-margin:, -margin:].ravel(),
-    ])
-    bg_median = float(np.median(corners))
-
-    # "Distance from background" score, then Otsu. On light backgrounds
-    # plain gray-Otsu can split multi-tone tools (e.g. yellow body + black
-    # grips) into many disconnected dark fragments because the bright body
-    # gets binned with the paper. Using max(saturation, 255 - value) instead
-    # treats both saturated *and* dark pixels as foreground, so the whole
-    # tool comes through as one contiguous component.
-    sat = hsv[..., 1]
-    val = hsv[..., 2]
-    if bg_median > 128:
-        score = np.maximum(sat, 255 - val)
-    else:
-        score = np.maximum(sat, val)
+    corner_pixels = np.concatenate([
+        img[:margin, :margin].reshape(-1, 3),
+        img[:margin, -margin:].reshape(-1, 3),
+        img[-margin:, :margin].reshape(-1, 3),
+        img[-margin:, -margin:].reshape(-1, 3),
+    ], axis=0)
+    bg_bgr = np.median(corner_pixels, axis=0).astype(np.uint8)
+    bg_lab = cv2.cvtColor(
+        bg_bgr.reshape(1, 1, 3), cv2.COLOR_BGR2LAB
+    ).reshape(3).astype(np.int32)
+    img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.int32)
+    diff = img_lab - bg_lab
+    score = np.sqrt((diff * diff).sum(axis=-1))
+    score = np.clip(score, 0, 255).astype(np.uint8)
     _, rough_mask = cv2.threshold(
         score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Kept for downstream branches that still ask "is the bg bright?"
+    # (recovery / refinement). Computed from the gray of the bg colour.
+    bg_median = float(cv2.cvtColor(
+        bg_bgr.reshape(1, 1, 3), cv2.COLOR_BGR2GRAY
+    )[0, 0])
 
     # Clean rough mask to get a stable bounding box
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
@@ -112,6 +117,8 @@ def segment_tool(
 
     contours, _ = cv2.findContours(
         rough_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    pad = max(30, int(0.02 * max(h, w)))
 
     bbox = None
     if contours:
@@ -129,7 +136,6 @@ def segment_tool(
             by = min(r[1] for r in rects)
             bx2 = max(r[0] + r[2] for r in rects)
             by2 = max(r[1] + r[3] for r in rects)
-            pad = max(30, int(0.02 * max(h, w)))
             bbox = [
                 max(0, bx - pad),
                 max(0, by - pad),
@@ -153,6 +159,29 @@ def segment_tool(
             else:
                 print(f"  WARNING: corrective point ({x:.0f}, {y:.0f}) "
                       f"outside image {w}x{h} — dropped")
+
+    # Expand bbox to encompass any positive corrective points. Without
+    # this, a click on (e.g.) a silver/desaturated tool tip whose Otsu
+    # rough_mask classified it as background sits OUTSIDE the bbox SAM2
+    # is constrained to, so SAM2 cannot extend the mask there however
+    # confidently the user clicks.
+    if bbox is not None and pt_xy:
+        positive_xy = [(x, y) for (x, y), lbl in zip(pt_xy, pt_labels) if lbl == 1]
+        if positive_xy:
+            px_min = min(x for x, _ in positive_xy)
+            py_min = min(y for _, y in positive_xy)
+            px_max = max(x for x, _ in positive_xy)
+            py_max = max(y for _, y in positive_xy)
+            new_bbox = [
+                max(0, min(bbox[0], int(px_min) - pad)),
+                max(0, min(bbox[1], int(py_min) - pad)),
+                min(w, max(bbox[2], int(px_max) + pad)),
+                min(h, max(bbox[3], int(py_max) + pad)),
+            ]
+            if new_bbox != bbox:
+                print(f"  Expanded bbox to include positive corrective "
+                      f"click(s): {bbox} -> {new_bbox}")
+                bbox = new_bbox
 
     sam_kwargs: dict = {"verbose": False}
     if bbox is not None:
@@ -217,7 +246,8 @@ def segment_tool(
     # the V-vertex). Carving here makes corrective_points authoritative
     # regardless of what upstream steps decide.
     if pt_xy:
-        mask = _apply_corrective_clicks(mask, pt_xy, pt_labels, bbox)
+        mask = _apply_corrective_clicks(mask, pt_xy, pt_labels, bbox,
+                                        image=gray)
 
     return mask
 
@@ -543,22 +573,36 @@ def _apply_corrective_clicks(
     pt_xy: list,
     pt_labels: list,
     bbox: Optional[list],
+    image: Optional[np.ndarray] = None,
     max_negative_fraction: float = 0.25,
-    max_positive_fraction: float = 0.05,
+    max_positive_fraction: float = 0.25,
+    flood_tolerance: int = 25,
 ) -> np.ndarray:
     """Apply corrective clicks as the final mask word.
 
-    For each negative click (label=0): find the connected component of
-    the FOREGROUND mask containing that pixel and remove it. Skipped if
-    the component is larger than ``max_negative_fraction`` of the
-    bbox-or-image area — guard against an LLM click that lands on the
-    main tool body and would otherwise delete the whole mask.
+    Negative click (label=0): drop the FOREGROUND connected component
+    containing the click. Skipped if the component exceeds
+    ``max_negative_fraction`` of the bbox-or-image area — guards against
+    an errant click on the main tool body that would otherwise delete
+    the whole mask.
 
-    For each positive click (label=1): find the connected component of
-    the BACKGROUND containing that pixel and add it. Skipped if the
-    component is larger than ``max_positive_fraction`` of the image area —
-    a click on the actual paper/scanner background would otherwise fill
-    everything.
+    Positive click (label=1): grow the mask outward from the click
+    through pixels close in grayscale value to the seed (fixed-range
+    flood, ±``flood_tolerance``). This isolates a tool feature like a
+    silver tip from the surrounding page background even when the two
+    are mask-connected. The flood is bounded by ``max_positive_fraction``
+    of the bbox area — a flood that escapes the tool and pours into the
+    page is rejected. When ``image`` is None the function falls back to
+    the older "fill the entire connected background component" behavior
+    (with the same bbox-based cap).
+
+    Why flood-fill over connected-components for positive clicks: the
+    desaturated tip of a tool that SAM2 missed is usually contiguous (in
+    mask space) with the rest of the page background, so its connected
+    component is the whole page minus the tool. Plain component fill
+    would either flood everything or — under any reasonable safety cap —
+    drop the click silently, which is the observed bug where positive
+    clicks on a tool's silver hook had no effect.
 
     Runs after SAM2 + recovery + refinement so it overrides any earlier
     decision. Idempotent: re-applying the same clicks to the same
@@ -575,7 +619,7 @@ def _apply_corrective_clicks(
     else:
         bbox_area = image_area
     fg_size_cap = int(max_negative_fraction * bbox_area)
-    bg_size_cap = int(max_positive_fraction * image_area)
+    bg_size_cap = int(max_positive_fraction * bbox_area)
 
     out = mask.copy()
     for (x, y), lbl in zip(pt_xy, pt_labels):
@@ -601,22 +645,55 @@ def _apply_corrective_clicks(
             print(f"  Corrective ({ix},{iy})=- : carved {comp_size} px "
                   f"foreground component")
         else:
-            # Positive click: fill the background component containing it.
+            # Positive click: add a local color-similar region around it.
             if out[iy, ix] != 0:
                 print(f"  Corrective ({ix},{iy})=+ : already foreground, skipped")
                 continue
-            n, labels = cv2.connectedComponents((out == 0).astype(np.uint8))
-            cid = labels[iy, ix]
-            comp_size = int(np.count_nonzero(labels == cid))
-            if comp_size > bg_size_cap:
-                print(f"  Corrective ({ix},{iy})=+ : component is "
-                      f"{comp_size} px ({100*comp_size/image_area:.0f}% "
-                      f"of image) — exceeds {100*max_positive_fraction:.0f}% "
-                      f"safety cap, skipped")
-                continue
-            out[labels == cid] = 255
-            print(f"  Corrective ({ix},{iy})=+ : filled {comp_size} px "
-                  f"background component")
+            if image is not None:
+                # Fixed-range flood on the source grayscale: include
+                # pixels within ±flood_tolerance of the seed value, then
+                # restrict to currently-background pixels. FLOODFILL_MASK_ONLY
+                # writes the result into ff_mask without mutating image.
+                ff_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+                cv2.floodFill(
+                    image.copy(), ff_mask, (ix, iy), newVal=0,
+                    loDiff=flood_tolerance, upDiff=flood_tolerance,
+                    flags=(255 << 8) | cv2.FLOODFILL_MASK_ONLY
+                          | cv2.FLOODFILL_FIXED_RANGE,
+                )
+                flood_region = (ff_mask[1:-1, 1:-1] > 0) & (out == 0)
+                comp_size = int(np.count_nonzero(flood_region))
+                if comp_size == 0:
+                    print(f"  Corrective ({ix},{iy})=+ : empty flood "
+                          f"region, skipped")
+                    continue
+                if comp_size > bg_size_cap:
+                    print(f"  Corrective ({ix},{iy})=+ : flood is "
+                          f"{comp_size} px ({100*comp_size/bbox_area:.0f}% "
+                          f"of bbox) — exceeds "
+                          f"{100*max_positive_fraction:.0f}% safety cap, "
+                          f"skipped (the click likely escaped into the "
+                          f"page background)")
+                    continue
+                out[flood_region] = 255
+                print(f"  Corrective ({ix},{iy})=+ : flood-filled "
+                      f"{comp_size} px (tol={flood_tolerance})")
+            else:
+                # Fallback when the source image isn't available: fill
+                # the entire connected background component.
+                n, labels = cv2.connectedComponents((out == 0).astype(np.uint8))
+                cid = labels[iy, ix]
+                comp_size = int(np.count_nonzero(labels == cid))
+                if comp_size > bg_size_cap:
+                    print(f"  Corrective ({ix},{iy})=+ : component is "
+                          f"{comp_size} px ({100*comp_size/bbox_area:.0f}% "
+                          f"of bbox) — exceeds "
+                          f"{100*max_positive_fraction:.0f}% safety cap, "
+                          f"skipped")
+                    continue
+                out[labels == cid] = 255
+                print(f"  Corrective ({ix},{iy})=+ : filled {comp_size} px "
+                      f"background component")
 
     return out
 

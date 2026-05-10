@@ -442,7 +442,8 @@ details[open] summary {
 
 /* ---------- Buttons ---------- */
 
-button.primary {
+button.primary,
+a.primary.button-link {
   background: var(--accent);
   color: var(--accent-fg);
   border: none;
@@ -454,7 +455,13 @@ button.primary {
   transition: background 0.12s;
 }
 
-button.primary:hover:not(:disabled) {
+a.primary.button-link {
+  display: inline-block;
+  text-decoration: none;
+}
+
+button.primary:hover:not(:disabled),
+a.primary.button-link:hover {
   background: #1d4ed8;
 }
 
@@ -853,13 +860,15 @@ button.secondary:hover {
 .click-dot {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 0.9em;
-  height: 0.9em;
-  line-height: 0.85em;
+  width: 0.675em;
+  height: 0.675em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
   border-radius: 50%;
-  text-align: center;
   font-weight: 700;
-  font-size: 0.75em;
+  font-size: 0.55em;
   color: #fff;
   border: 1px solid #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);

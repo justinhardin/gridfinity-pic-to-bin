@@ -19,11 +19,83 @@ import numpy as np
 
 from pic_to_bin.phone_template import (
     ARUCO_DICT_ID,
+    MARKER_QUIET_PAD_MM,
     MARKER_SIZE_MM,
     PAPER_SIZES,
     get_marker_positions,
     get_placement_zone,
 )
+
+
+def _mask_marker_quiet_pads(cropped: np.ndarray, paper_size: str,
+                            px_per_mm: float,
+                            safety_margin_mm: float = 8.0,
+                            edge_band_mm: float = 2.5) -> np.ndarray:
+    """Repaint the white quiet-zone pads, marker ID labels, and dashed
+    placement-zone border that bleed into the cropped image on green-bg
+    templates.
+
+    Three sources of bright artefacts at the cropped edges:
+
+    * The MARKER_QUIET_PAD_MM-wide pads behind each ArUco marker —
+      protrude ~4 mm into the placement zone.
+    * The "ID 0", "ID 1" … text labels printed 3 mm below each top /
+      edge-mid marker, drawn WHITE on green-bg templates so they sit a
+      few millimetres inside the placement zone.
+    * The dashed placement-zone border itself, drawn at the zone edge.
+
+    Strategy: paint a generous rectangle around each marker (pad +
+    safety margin to cover labels and homography drift) AND a thin band
+    along every cropped-image edge (covers the dashed border and any
+    sliver the per-marker rectangles miss). Then refill with the median
+    of the rest of the image so SAM2 sees uniform background where the
+    artefacts used to be. No-op on white-bg templates — pad / label /
+    border are all the same colour as the page.
+    """
+    h, w = cropped.shape[:2]
+    pad_half_mm = MARKER_SIZE_MM / 2.0 + MARKER_QUIET_PAD_MM + safety_margin_mm
+    zx0, zy0, _, _ = get_placement_zone(paper_size)
+
+    pad_mask = np.zeros((h, w), dtype=np.uint8)
+    for _mid, mcx, mcy in get_marker_positions(paper_size):
+        cx0 = (mcx - pad_half_mm - zx0) * px_per_mm
+        cy0 = (mcy - pad_half_mm - zy0) * px_per_mm
+        cx1 = (mcx + pad_half_mm - zx0) * px_per_mm
+        cy1 = (mcy + pad_half_mm - zy0) * px_per_mm
+        rx0 = max(0, int(round(cx0)))
+        ry0 = max(0, int(round(cy0)))
+        rx1 = min(w, int(round(cx1)))
+        ry1 = min(h, int(round(cy1)))
+        if rx1 > rx0 and ry1 > ry0:
+            pad_mask[ry0:ry1, rx0:rx1] = 255
+
+    # Belt-and-suspenders edge band — covers the dashed placement-zone
+    # border and any per-marker artefact wider than the per-marker rect.
+    band_px = max(1, int(round(edge_band_mm * px_per_mm)))
+    pad_mask[:band_px, :] = 255
+    pad_mask[h - band_px:, :] = 255
+    pad_mask[:, :band_px] = 255
+    pad_mask[:, w - band_px:] = 255
+
+    if not pad_mask.any():
+        return cropped
+
+    # Sample the bg from non-pad pixels via median (robust to whatever
+    # tool happens to be in the rest of the image).
+    non_pad = pad_mask == 0
+    if not non_pad.any():
+        return cropped
+    if cropped.ndim == 3:
+        bg_color = np.median(cropped[non_pad], axis=0).astype(cropped.dtype)
+    else:
+        bg_color = np.uint8(np.median(cropped[non_pad]))
+
+    out = cropped.copy()
+    out[pad_mask > 0] = bg_color
+    pad_px = int(np.count_nonzero(pad_mask))
+    print(f"  Repainted {pad_px} px of marker quiet-zone pads + edge band "
+          f"with bg color {tuple(int(c) for c in np.atleast_1d(bg_color))}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +695,7 @@ def preprocess_phone_image(
     crop_x1 = int(round(zx1 * px_per_mm))
     crop_y1 = int(round(zy1 * px_per_mm))
     cropped = rectified[crop_y0:crop_y1, crop_x0:crop_x1]
+    cropped = _mask_marker_quiet_pads(cropped, paper_size, px_per_mm)
 
     zone_w_mm = zx1 - zx0
     zone_h_mm = zy1 - zy0
