@@ -321,8 +321,14 @@ def create_stacking_lip(root_comp, config):
     cutout_r = mm(LIP_CUTOUT_CORNER_R_MM)
 
     cutout_z = bin_d + mm(BASE_PROFILE_HEIGHT_MM)
-    top_x0, top_y0 = -cl, -cl
-    top_x1, top_y1 = bin_w + cl, bin_h + cl
+    # The body sits inside the grid-pitch envelope by ``cl`` on each side
+    # (so its corner is at +cl in absolute baseplate coords). The lip cutout
+    # is sized to receive the next bin's base profile with ``cl`` of stacking
+    # clearance, i.e. it extends ``cl`` past the grid pitch — which is ``2*cl``
+    # past the body envelope on each side.
+    overhang = 2 * cl
+    top_x0, top_y0 = -overhang, -overhang
+    top_x1, top_y1 = bin_w + overhang, bin_h + overhang
 
     cutout_plane_input = planes.createInput()
     cutout_plane_input.setByOffset(
@@ -614,15 +620,20 @@ def create_base_interface(root_comp, config):
     extrudes = root_comp.features.extrudeFeatures
     tol = 0.005
 
+    # The body's local origin (0, 0) sits at the body's outer corner —
+    # which is BASE_CLEARANCE_MM inside the grid pitch on each side. So
+    # pad gx=0 starts at the body corner (x=0); the pad-to-pad pitch is
+    # the full 42 mm grid pitch, and each pad spans pad_mm = 41.5 mm.
+
     # Pass 1 — wide pads, single sketch + single extrude
     wide_sketch = root_comp.sketches.add(xy_plane)
     wide_sketch.name = "base_pad_wide"
     for gx in range(grid_x):
         for gy in range(grid_y):
-            x0 = mm(gx * unit_mm + BASE_CLEARANCE_MM)
-            y0 = mm(gy * unit_mm + BASE_CLEARANCE_MM)
-            x1 = mm((gx + 1) * unit_mm - BASE_CLEARANCE_MM)
-            y1 = mm((gy + 1) * unit_mm - BASE_CLEARANCE_MM)
+            x0 = mm(gx * unit_mm)
+            y0 = mm(gy * unit_mm)
+            x1 = mm(gx * unit_mm + pad_mm)
+            y1 = mm(gy * unit_mm + pad_mm)
             _draw_rounded_rect(wide_sketch, x0, y0, x1, y1, mm(corner_r))
 
     wide_profiles = _all_profiles(wide_sketch)
@@ -670,8 +681,10 @@ def create_base_interface(root_comp, config):
     narrow_sketch.name = "base_pad_narrow"
     for gx in range(grid_x):
         for gy in range(grid_y):
-            cx = (gx + 0.5) * unit_mm
-            cy = (gy + 0.5) * unit_mm
+            # Center each narrow post on the corresponding wide pad
+            # (pad spans [gx*42, gx*42 + pad_mm]).
+            cx = gx * unit_mm + pad_mm / 2
+            cy = gy * unit_mm + pad_mm / 2
             x0 = mm(cx - narrow_mm / 2)
             y0 = mm(cy - narrow_mm / 2)
             x1 = mm(cx + narrow_mm / 2)

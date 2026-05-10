@@ -29,6 +29,11 @@ HEIGHT_UNIT_MM = 7.0
 WALL_THICKNESS_MM = 1.6
 FLOOR_THICKNESS_MM = 1.2
 CLEARANCE_MM = 0.5
+# Per the gridfinity spec, the bin's base profile (and the body above it)
+# is 0.25 mm inside the 42 mm grid pitch on every side — so a 1-unit bin's
+# external footprint is 41.5 × 41.5 mm. Adjacent bins share the resulting
+# 0.5 mm gap. Must match BASE_CLEARANCE_MM in _bin_builder.py.
+BASE_CLEARANCE_MM = 0.25
 # Per the gridfinity spec, the standard stacking lip is 3.8 mm (some
 # generators use 4.4 mm for a slightly chunkier profile); we match the
 # Fusion-side value in _bin_builder.py.
@@ -232,25 +237,35 @@ def compute_bin_params(grid_x: int, grid_y: int,
 
     Returns a dict with all physical dimensions in mm.
 
+    ``bin_width_mm`` / ``bin_height_mm`` are the body footprint —
+    ``grid_x × 42 − 0.5`` mm. The 0.5 mm comes off the grid pitch as
+    ``2 × BASE_CLEARANCE_MM`` so that adjacent bins on a baseplate share
+    the spec's 0.5 mm gap (0.25 mm per side). The body's local origin
+    (0, 0) sits at the body's outer corner, not the grid-cell corner,
+    so a 1-unit bin extrudes from (0, 0) to (41.5, 41.5).
+
     ``bin_depth_mm`` is the standard gridfinity unit-count height
     (U×7), i.e. the total external height excluding the lip. It is
     the canonical "Nh" height of the bin. ``bin_body_height_mm`` is
     the actual body extrusion above z=0; the remaining 5 mm of the
     U×7 lives in the base profile pads below z=0.
     """
+    bin_w = grid_x * GRID_UNIT_MM - 2 * BASE_CLEARANCE_MM
+    bin_h = grid_y * GRID_UNIT_MM - 2 * BASE_CLEARANCE_MM
     return {
         "grid_x": grid_x,
         "grid_y": grid_y,
         "height_units": height_units,
-        "bin_width_mm": grid_x * GRID_UNIT_MM,
-        "bin_height_mm": grid_y * GRID_UNIT_MM,
+        "bin_width_mm": bin_w,
+        "bin_height_mm": bin_h,
         "bin_depth_mm": height_units * HEIGHT_UNIT_MM,
         "bin_body_height_mm": bin_body_height_mm(height_units),
-        "inner_width_mm": grid_x * GRID_UNIT_MM - 2 * CLEARANCE_MM,
-        "inner_height_mm": grid_y * GRID_UNIT_MM - 2 * CLEARANCE_MM,
+        "inner_width_mm": bin_w - 2 * CLEARANCE_MM,
+        "inner_height_mm": bin_h - 2 * CLEARANCE_MM,
         "wall_thickness_mm": WALL_THICKNESS_MM,
         "floor_thickness_mm": FLOOR_THICKNESS_MM,
         "clearance_mm": CLEARANCE_MM,
+        "base_clearance_mm": BASE_CLEARANCE_MM,
         "stacking_lip_height_mm": STACKING_LIP_HEIGHT_MM,
         "base_profile_height_mm": BASE_PROFILE_HEIGHT_MM,
     }
@@ -493,7 +508,7 @@ def prepare_bin(dxf_path: str, tool_heights: dict | float,
 
     print(f"  Height: {config['height_units']} units "
           f"({config['bin_depth_mm']:.0f}mm)")
-    print(f"  Bin: {config['bin_width_mm']:.0f}x{config['bin_height_mm']:.0f}mm "
+    print(f"  Bin: {config['bin_width_mm']:.1f}x{config['bin_height_mm']:.1f}mm "
           f"x {config['bin_depth_mm']:.0f}mm")
     print(f"  Stacking lip: {'yes' if config['stacking_lip'] else 'no'}")
 
