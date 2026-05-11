@@ -90,6 +90,8 @@ const FIELD_INFO = {
       "Positive — looser fit. Use for soft or rubber-handled tools, or if your printer over-extrudes.",
       "Negative — tighter fit. The first −0.3 to −0.5 mm gives a snug, hand-fit feel. Going more negative produces an interference fit (the tool wedges in).",
       `−${TOLERANCE_BASELINE_MM} — pocket matches the trace exactly (no clearance at all). Below this value the pocket is smaller than the trace.`,
+      `Typical range: −${TOLERANCE_BASELINE_MM} to +2 mm. Default: 0.`,
+      "Higher → looser pocket, easier to drop the tool in, but it can rattle. Lower → tighter pocket, premium feel, harder to insert; below −0.5 mm you may need to sand or force the tool in.",
       "The tolerance polygon is always Douglas-Peucker simplified at 0.3 mm regardless of value, so Fusion gets a clean low-point-count cut.",
     ],
   },
@@ -101,6 +103,8 @@ const FIELD_INFO = {
       "Why this exists: SAM2 segmentation under-detects tapered or thin tool tips, so the raw trace is shorter than the real tool. Adding *uniform* tolerance to compensate makes the wider sections too loose; this setting fixes only the ends.",
       "Default 'auto' (blank field) computes a value from the trace: a square-ended tool (e.g. ruler) gets ~0.5 mm; a sharply tapered tool (e.g. shears) gets up to ~3 mm. Formula: 0.5 + 0.014 × axial_length × taper, where taper = 1 − tip_width / body_width.",
       "Override by typing a number — e.g. 1.0 to push each end outward by 1 mm regardless of shape. Set to 0 for fully uniform tolerance.",
+      "Typical range: 0 to 5 mm (or blank = auto). Default: auto.",
+      "Higher → longer pocket, the tool tip never bottoms out, but the pocket sticks out beyond the tool. Lower → tighter at the tips; below auto, sharply tapered tools may not seat all the way in.",
       "Caveat: the stretch is linear in the rotated frame, so any features along the axis stretch slightly too. Fine for typical hand tools, less ideal for tools with internal axis-parallel features (rare).",
     ],
   },
@@ -109,7 +113,9 @@ const FIELD_INFO = {
     hint: "Minimum space between adjacent pockets in the layout.",
     body: [
       "When packing multiple tools into one bin, leave at least this much wall between any two pockets.",
-      "Smaller values pack more tools into a smaller bin but make individual tools harder to grab. Larger values give roomier separation but grow the bin.",
+      "Note: this is the MINIMUM. When the bin has slack after snapping to a whole gridfinity unit, the extra space is redistributed evenly between tools, so actual gaps can be larger.",
+      "Typical range: 1 to 10 mm. Default: 3 mm.",
+      "Higher → roomier separation, easier to grab a single tool, but the bin grows when the extra width crosses a 42 mm unit boundary. Lower → more tools fit in a smaller bin, but pockets can feel cramped and the inter-pocket wall gets fragile to print.",
     ],
   },
   bin_margin: {
@@ -119,6 +125,8 @@ const FIELD_INFO = {
       "Extra padding between the outermost tool extent and the bin boundary, applied before snapping to a whole gridfinity unit.",
       "Usually you don't need this — the natural slack from rounding the bin size up to a whole 42 mm unit, plus the tolerance, is enough.",
       "Set this >0 to force the bin one unit larger when a tool would otherwise sit right against the wall.",
+      "Typical range: 0 to 6 mm. Default: 0.",
+      "Higher → bin bumps up to the next 42 mm unit sooner, giving more breathing room between tool and wall — useful if your prints distort near the edges. Lower (or 0) → smallest possible bin; tools may sit right against the wall when the snap slack is small.",
     ],
   },
   min_units: {
@@ -127,6 +135,8 @@ const FIELD_INFO = {
     body: [
       "Force the bin to be at least this many units wide and tall, even if the tool would fit in something smaller.",
       "Useful when you want the bin to match an existing drawer slot or to look uniform alongside other bins in a set.",
+      "Typical range: 1 to 7 (must be ≤ max_units). Default: 1.",
+      "Higher → bin is at least N×N units even for a small tool, so it slots into a fixed drawer layout — at the cost of using more filament and bench space. Lower → bin shrinks to the tightest gridfinity unit count that fits the tool.",
     ],
   },
   max_units: {
@@ -135,6 +145,8 @@ const FIELD_INFO = {
     body: [
       "Cap on how big the bin can grow per axis. If the tools don't fit in this size the pipeline raises an error rather than silently producing a giant bin.",
       "Default 7×7 is plenty for most hand tools.",
+      "Typical range: 2 to 12 (must be ≥ min_units). Default: 7.",
+      "Higher → larger tools or multi-tool layouts are allowed to spawn larger bins. Lower → packing fails fast with an actionable error instead of producing a bin that won't fit your gridfinity baseplate.",
     ],
   },
   height_units: {
@@ -144,6 +156,8 @@ const FIELD_INFO = {
       "Each gridfinity height unit is 7 mm.",
       "When blank (default), the pipeline picks the smallest height that fits the tallest tool plus 1 mm of floor below the pocket.",
       "Set explicitly if you need to match an existing stack or want a deeper pocket than the tool requires.",
+      "Typical range: 2 to 12 units (each = 7 mm). Default: auto.",
+      "Higher → taller bin, deeper pocket — the tool sits lower and exposes less for finger access, and the print takes more filament. Lower → shorter bin; if you set this below the auto value the tool will stick out the top.",
     ],
   },
   stacking: {
@@ -168,6 +182,8 @@ const FIELD_INFO = {
     body: [
       "After tracing, if the tool's principal axis is within this many degrees of horizontal or vertical, the pipeline rotates the trace to align with the bin axes.",
       "Set to 0 to disable auto-straightening (use the exact rotation captured in the photo).",
+      "Typical range: 0 to 45 degrees. Default: 45.",
+      "Higher → almost any rotation gets snapped to horizontal/vertical, giving a cleaner-looking pocket in the bin even from a sloppy photo. Lower → the pocket preserves the exact tilt of the tool in the photo; set to 0 if your tool genuinely sits at an off-axis angle in real use.",
     ],
   },
   max_refine_iterations: {
@@ -176,6 +192,8 @@ const FIELD_INFO = {
     body: [
       "After SAM2 produces an initial mask, the pipeline iteratively cleans it up — closing notches, smoothing contours — and re-checks the result.",
       "More iterations let it produce smoother outlines for noisy photos but take longer. Default 5 is a good balance.",
+      "Typical range: 1 to 10. Default: 5.",
+      "Higher → smoother contours on noisy photos at the cost of a few extra seconds per tool, with diminishing returns past ~6 passes. Lower → faster trace; set to 1 to disable iterative refinement entirely and use the raw SAM2 mask, which can leave small notches or jagged edges.",
     ],
   },
   max_concavity_depth: {
@@ -184,6 +202,8 @@ const FIELD_INFO = {
     body: [
       "Cleanup may fill shallow concavities to smooth the outline. This is the deepest concavity (in mm) the cleanup is allowed to lose before stopping.",
       "Increase if your tool has deliberate notches that are getting filled in. Decrease for cleaner outlines on simple shapes.",
+      "Typical range: 0.5 to 10 mm. Default: 3 mm.",
+      "Higher → cleanup keeps going until even deep notches are preserved, which is right for tools with intentional cutouts (scissor finger holes, wrench openings) but may leave jagged outlines on noisy traces. Lower → aggressive smoothing fills in real features; useful for blob-shaped tools (handles, grips) where you don't care about minor surface detail.",
     ],
   },
   mask_erode: {
@@ -193,6 +213,8 @@ const FIELD_INFO = {
       "Phone photos can have a soft shadow halo around the tool that SAM2 picks up as part of the mask, making the trace slightly fatter than reality.",
       "This setting erodes the mask by N millimeters before vectorization. The default is 0 because a uniform erosion disproportionately shrinks thin or tapered tool tips, which often makes those pockets too tight even when the wider sections fit.",
       "Increase to 0.3–0.5 mm only if your photo has a visible shadow halo and the trace clearly extends beyond the tool's actual outline.",
+      "Typical range: 0 to 1 mm. Default: 0.",
+      "Higher → tighter trace, useful when shadows have inflated it; but tapered tips shrink faster than the body so the pocket can pinch the tip before the body seats. Lower (0) → keep the raw SAM2 outline; prefer this and use negative Tolerance to tighten the fit uniformly instead.",
     ],
   },
   display_smooth_sigma: {
@@ -201,6 +223,8 @@ const FIELD_INFO = {
     body: [
       "Gaussian smoothing applied to the trace polygon perpendicular to the tool's principal axis. SAM2 produces wave-noise on polished metal blades; this knob removes it.",
       "Increase (3–5 mm) if reflective tools like scissor blades come out with a visibly wavy outline. Decrease (or set to 0) if the trace is over-smoothing intentional features — e.g. a bracket whose 90° corners are showing up rounded.",
+      "Typical range: 0 to 5 mm. Default: 2.5 mm.",
+      "Higher → glassy-smooth outline, ideal for reflective metal where SAM2 produces noticeable waves; but moderately curved features (radii, fillets) soften past their real shape. Lower → preserves curvy detail and sharp transitions; set to 0 to keep the trace exactly as Douglas-Peucker emitted it.",
       "Sharp corners are preserved automatically by curvature-aware blending regardless of this value, but moderately curved features still soften at higher settings. Default 2.5 mm balances both cases.",
     ],
   },

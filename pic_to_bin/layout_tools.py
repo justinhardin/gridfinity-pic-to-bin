@@ -703,36 +703,111 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
         placed_widths.append(tool_widths[j])
         placed_heights.append(tool_heights[j])
 
-    # Per-tool re-centering: a tool whose y-range is shared with no other
-    # tool has its "row" to itself and can be horizontally centered in the
-    # bin independently. Same for x. The collective center pass above keeps
-    # the group balanced; this pass cleans up the case where individual
-    # tools get nudged off-axis by the polygon packer (e.g. when one has a
-    # slot that extends past its body in x while the other doesn't).
-    eps = 0.5  # mm, treat near-touching ranges as overlapping
-    for j in range(len(placed)):
-        jy0 = placed[j].offset_y
-        jy1 = jy0 + placed_heights[j]
-        jx0 = placed[j].offset_x
-        jx1 = jx0 + placed_widths[j]
-
-        y_alone = all(
-            placed[k].offset_y + placed_heights[k] <= jy0 + eps
-            or placed[k].offset_y >= jy1 - eps
-            for k in range(len(placed)) if k != j
-        )
-        if y_alone:
-            placed[j].offset_x = (bin_w - placed_widths[j]) / 2.0
-
-        x_alone = all(
-            placed[k].offset_x + placed_widths[k] <= jx0 + eps
-            or placed[k].offset_x >= jx1 - eps
-            for k in range(len(placed)) if k != j
-        )
-        if x_alone:
-            placed[j].offset_y = (bin_h - placed_heights[j]) / 2.0
+    # Spread tools within their row / column to distribute slack. For each
+    # group of tools sharing a y-overlap ("row"), distribute the x-slack
+    # evenly so the row reads as N+1 equal gaps instead of all-pack-left
+    # plus one big margin on the right. Same idea for x-overlap groups
+    # along y. Collapses to centering for single-tool groups (replacing
+    # the previous per-tool y_alone / x_alone re-center pass). Each
+    # inter-tool gap is held at >= gap_mm so we never squeeze the
+    # polygon-packer's safe spacing — only outer margins absorb the
+    # remainder when slack is tight.
+    _spread_within_rows(placed, placed_widths, placed_heights,
+                        bin_w, bin_h, gap_mm)
 
     return placed, units_x, units_y
+
+
+def _spread_within_rows(placed, widths, heights, bin_w, bin_h, gap_mm,
+                        eps_mm: float = 0.5) -> None:
+    """Distribute slack along each axis within rows / columns. In-place."""
+    # X-spread within each y-overlap group.
+    y_intervals = [(placed[j].offset_y, placed[j].offset_y + heights[j])
+                   for j in range(len(placed))]
+    for group in _overlap_groups(y_intervals, eps_mm):
+        _space_evenly(
+            group,
+            get_pos=lambda j: placed[j].offset_x,
+            set_pos=lambda j, v: setattr(placed[j], "offset_x", v),
+            get_size=lambda j: widths[j],
+            total=bin_w,
+            min_inter_gap=gap_mm,
+        )
+    # Y-spread within each x-overlap group, using the just-updated x's.
+    x_intervals = [(placed[j].offset_x, placed[j].offset_x + widths[j])
+                   for j in range(len(placed))]
+    for group in _overlap_groups(x_intervals, eps_mm):
+        _space_evenly(
+            group,
+            get_pos=lambda j: placed[j].offset_y,
+            set_pos=lambda j, v: setattr(placed[j], "offset_y", v),
+            get_size=lambda j: heights[j],
+            total=bin_h,
+            min_inter_gap=gap_mm,
+        )
+
+
+def _overlap_groups(intervals: list[tuple[float, float]],
+                    eps: float = 0.5) -> list[list[int]]:
+    """Group indices whose intervals overlap (transitively) by more than eps."""
+    n = len(intervals)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a0, a1 = intervals[i]
+            b0, b1 = intervals[j]
+            if min(a1, b1) - max(a0, b0) > eps:
+                ra, rb = find(i), find(j)
+                if ra != rb:
+                    parent[ra] = rb
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _space_evenly(indices, get_pos, set_pos, get_size, total,
+                  min_inter_gap: float) -> None:
+    """Place ``indices`` along an axis with equal gaps where possible.
+
+    Sorted by current position to preserve packer ordering. For a single
+    tool, centers it. For multiple tools, distributes total - sum(sizes)
+    as (k+1) equal gaps when room allows; otherwise pins inter-tool gaps
+    at ``min_inter_gap`` and splits the remainder as outer margins.
+    """
+    indices = sorted(indices, key=get_pos)
+    sizes = [get_size(j) for j in indices]
+    k = len(indices)
+    slack = total - sum(sizes)
+    if slack < 0:
+        return  # bin too small for an even pass; leave packer's output
+
+    if k == 1:
+        set_pos(indices[0], slack / 2.0)
+        return
+
+    even = slack / (k + 1)
+    if even >= min_inter_gap:
+        gap_outer = gap_inter = even
+    else:
+        reserved = min_inter_gap * (k - 1)
+        outer = (slack - reserved) / 2.0
+        if outer < 0:
+            return  # can't satisfy min_inter_gap; bail to packer's output
+        gap_outer, gap_inter = outer, min_inter_gap
+
+    pos = gap_outer
+    for j, size in zip(indices, sizes):
+        set_pos(j, pos)
+        pos += size + gap_inter
 
 
 # ---------------------------------------------------------------------------
