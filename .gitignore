@@ -16,6 +16,8 @@ web_jobs/
 *.heic
 *.heif
 IMG_*.png
+# But keep curated example photos bundled with the web UI
+!pic_to_bin/web/static/photo_tips/*.jpg
 
 # Screenshots (Windows / macOS default filenames)
 Screenshot*.png

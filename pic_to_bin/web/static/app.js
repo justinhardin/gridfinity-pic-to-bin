@@ -55,6 +55,25 @@ const FIELD_INFO = {
       "Special characters are stripped automatically: only letters, numbers, underscores, and hyphens are kept; spaces become underscores. Leave it blank to keep the default filenames.",
     ],
   },
+  photo_tips: {
+    title: "Photo tips",
+    hint: "How to take a photo that traces cleanly.",
+    images: [
+      { src: "/static/photo_tips/pipe_cutter.jpg",
+        caption: "Large hand tool, white template, centered, soft overhead light." },
+      { src: "/static/photo_tips/blade_case.jpg",
+        caption: "Boxy item with high-contrast labels, no hard shadows around the edges." },
+      { src: "/static/photo_tips/screwdriver_green.jpg",
+        caption: "Dark slim tool on the green chroma-key template — helps SAM2 with small light-on-dark tools." },
+    ],
+    body: [
+      "Shoot from directly above. Hold the phone parallel to the template and centered over it — the closer to a true overhead angle, the better the ArUco markers calibrate the scale. Moderate tilts are corrected by the homography, but extreme angles lose accuracy at the tool tips.",
+      "Center the tool within the dotted placement zone on the template. Keep some white space around it so SAM2 sees a clean tool-vs-background edge on every side.",
+      "Use even, diffuse lighting. Soft overhead light (a bright room, a window with a sheer curtain, or a ring/softbox) produces the cleanest trace. Try to keep shadows few and soft — hard shadows from a single point source can be picked up as part of the tool outline.",
+      "Make sure all eight ArUco markers are visible and unobstructed. Three is the minimum the pipeline accepts, but eight gives the best perspective correction.",
+      "Print the template at 100% scale on white paper (or chroma-key green for light/reflective tools). Never \"fit to page\" — that rescales the markers and breaks calibration.",
+    ],
+  },
   tool_height: {
     title: "Tool height (mm)",
     hint: "Required. Measure with calipers — depth of the tool when it lies flat.",
@@ -76,8 +95,8 @@ const FIELD_INFO = {
     title: "Tool side profile",
     hint: "Where the tool is widest, viewed from the side. Affects parallax.",
     body: [
-      "Pick the side-profile shape closest to your tool. The pipeline uses this to decide which height to use when compensating for parallax — tools that taper inward (wider at the bottom) need no compensation, while tools that flare outward at the top or have vertical sides need the full correction.",
-      "Widest at top or uniform — flares outward at the top, or has vertical sides where the top and bottom outlines match. Most hand tools fall here (screwdrivers, pliers, hammers, wrenches with flared handles), as do boxy items (multimeters, batteries, USB drives). Both share the same parallax math because the visible silhouette is dominated by the top of the tool either way.",
+      "Pick the side-profile shape closest to your tool. The pipeline uses this to decide which height to use when compensating for parallax — tools that taper inward (wider at the bottom) need no compensation, while tools that flare outward at the top, have vertical sides, or bulge in the middle need the full correction.",
+      "Widest at top, uniform, or widest in the middle — flares outward at the top, has vertical sides where the top and bottom outlines match, or bulges in the middle (cylinders, rounded handles, lozenge shapes). Most hand tools fall here (screwdrivers, pliers, hammers, wrenches with flared handles), as do boxy items (multimeters, batteries, USB drives) and rounded items (flashlights, batteries on their side). All three share the same parallax math because the silhouette peak sits near the middle of the tool's height.",
       "Widest at bottom — tapers inward going up. Zircon stud finders, computer mice, phone cases, tape-measure cases.",
       "Picking the wrong option makes the trace a few percent too small or too big, with the error growing with tool height. For a 30 mm-tall tool at typical hand-held distance the swing between options is around 3 %; for a 100 mm-tall tool it's about 10 %.",
     ],
@@ -219,12 +238,12 @@ const FIELD_INFO = {
   },
   display_smooth_sigma: {
     title: "Smoothing strength (mm)",
-    hint: "Smooths SAM2 noise on reflective surfaces. Default 2.5 mm.",
+    hint: "Smooths SAM2 noise along the trace. Default 2.5 mm.",
     body: [
-      "Gaussian smoothing applied to the trace polygon perpendicular to the tool's principal axis. SAM2 produces wave-noise on polished metal blades; this knob removes it.",
-      "Increase (3–5 mm) if reflective tools like scissor blades come out with a visibly wavy outline. Decrease (or set to 0) if the trace is over-smoothing intentional features — e.g. a bracket whose 90° corners are showing up rounded.",
+      "Gaussian smoothing applied to the trace polygon perpendicular to the tool's principal axis. It removes wave-noise that SAM2 can produce along an otherwise straight edge.",
+      "Increase (3–5 mm) if the trace comes out with a visibly wavy outline along sections that should be straight or gently curved. Decrease (or set to 0) if the trace is over-smoothing intentional features — e.g. a bracket whose 90° corners are showing up rounded.",
       "Typical range: 0 to 5 mm. Default: 2.5 mm.",
-      "Higher → glassy-smooth outline, ideal for reflective metal where SAM2 produces noticeable waves; but moderately curved features (radii, fillets) soften past their real shape. Lower → preserves curvy detail and sharp transitions; set to 0 to keep the trace exactly as Douglas-Peucker emitted it.",
+      "Higher → glassy-smooth outline; but moderately curved features (radii, fillets) soften past their real shape. Lower → preserves curvy detail and sharp transitions; set to 0 to keep the trace exactly as Douglas-Peucker emitted it.",
       "Sharp corners are preserved automatically by curvature-aware blending regardless of this value, but moderately curved features still soften at higher settings. Default 2.5 mm balances both cases.",
     ],
   },
@@ -496,6 +515,16 @@ class PicApp extends LitElement {
             <button class="modal-close" type="button" @click=${close} aria-label="Close">×</button>
           </div>
           <div class="modal-body">
+            ${info.images && info.images.length ? html`
+              <div class="modal-image-grid">
+                ${info.images.map(im => html`
+                  <figure class="modal-example">
+                    <img src=${im.src} alt=${im.caption || ""} loading="lazy">
+                    ${im.caption ? html`<figcaption>${im.caption}</figcaption>` : nothing}
+                  </figure>
+                `)}
+              </div>
+            ` : nothing}
             ${info.body.map(p => html`<p>${p}</p>`)}
           </div>
           <div class="modal-footer">
@@ -879,7 +908,7 @@ class PicForm extends LitElement {
       <div class="card">
         <div class="card-header">
           <h2>2. Photos</h2>
-          ${this._renderInfoLink("tool_height", "About tool height")}
+          ${this._renderInfoLink("photo_tips", "Photo tips")}
         </div>
         <div class="dropzone ${this.dragOver ? "over" : ""}"
              @click=${() => this.querySelector("input[type=file]").click()}
@@ -1070,19 +1099,21 @@ class PicForm extends LitElement {
     // bottom edge at y=44, top at y=8 so the top/bottom width difference
     // is visually obvious.
     //
-    // "top" and "uniform" use identical parallax math (same z = tool_height),
-    // so they're presented as a single radio that emits "top". Both
-    // silhouettes are shown side by side inside the option so users can
-    // recognize either shape as theirs.
+    // "top", "uniform", and "widest in the middle" use identical parallax
+    // math (z ≈ tool_height/2), so they're presented as a single radio that
+    // emits "top". All three silhouettes are shown side by side inside the
+    // option so users can recognize their tool's shape.
     const options = [
       {
         value: "top",
-        label: "Widest at top or uniform",
+        label: "Widest at top, uniform, or widest in the middle",
         icon: html`
-          <svg viewBox="0 0 132 56" width="148" height="64" aria-hidden="true">
+          <svg viewBox="0 0 200 56" width="220" height="64" aria-hidden="true">
             <line x1="2" y1="48" x2="62" y2="48"
                   stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
             <line x1="70" y1="48" x2="130" y2="48"
+                  stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
+            <line x1="138" y1="48" x2="198" y2="48"
                   stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
             <polygon points="22,44 42,44 60,8 4,8"
                      fill="currentColor" fill-opacity="0.18"
@@ -1092,6 +1123,9 @@ class PicForm extends LitElement {
                   fill="currentColor" fill-opacity="0.18"
                   stroke="currentColor" stroke-width="2"
                   stroke-linejoin="round"/>
+            <ellipse cx="168" cy="26" rx="26" ry="18"
+                     fill="currentColor" fill-opacity="0.18"
+                     stroke="currentColor" stroke-width="2"/>
           </svg>`,
       },
       {
@@ -1318,7 +1352,7 @@ class PicProgress extends LitElement {
     const subSteps = this._computeImageSubsteps();
     return html`
       <div class="card">
-        <h2>Working...</h2>
+        <h2>5. Working...</h2>
         <ul class="steps">
           ${stepStates.map((s, i) => html`
             <li class=${s.cls}>
@@ -1335,10 +1369,6 @@ class PicProgress extends LitElement {
             </li>
           `)}
         </ul>
-      </div>
-      <div class="card">
-        <h3>Log</h3>
-        <div class="log">${this.events.map(e => `[${e.step}] ${e.message}\n`).join("")}</div>
       </div>
     `;
   }
@@ -1510,7 +1540,7 @@ class PicPreview extends LitElement {
     const svgUrl = this.layoutInfo?.artifacts?.fit_test_svg;
     return html`
       <div class="card">
-        <h2>Layout preview</h2>
+        <h2>6. Layout preview</h2>
         ${this.layoutInfo ? html`
           <p class="hint">Bin: ${this.layoutInfo.grid_units_x} L × ${this.layoutInfo.grid_units_y} W${this.layoutInfo.grid_units_z != null ? html` × ${this.layoutInfo.grid_units_z} H` : nothing} gridfinity units</p>
         ` : nothing}
@@ -1529,7 +1559,7 @@ class PicPreview extends LitElement {
       ${pdfUrl || svgUrl ? html`
         <div class="card fit-test-card">
           <div class="card-header">
-            <h2>Test the fit before printing</h2>
+            <h2>8. Test the fit before printing</h2>
             <button class="info-link" type="button"
                     @click=${() => showInfo(this, "fit_test")}>
               <span class="info-btn">i</span> What is this?
@@ -1556,7 +1586,7 @@ class PicPreview extends LitElement {
       ` : nothing}
 
       <div class="card">
-        <h2>Looks good?</h2>
+        <h2>9. Looks good?</h2>
         <div class="actions">
           <button class="primary"
                   ?disabled=${this.llmBusy || this.running}
@@ -1852,10 +1882,14 @@ class PicPreview extends LitElement {
     const k = this.artifactKey;
     return html`
       <div class="card corrective-card">
-        <h2>Corrective clicks</h2>
+        <h2>7. Corrective clicks <span class="card-h2-sub">(optional)</span></h2>
         <p class="hint">
-          Add SAM2 corrective clicks on the per-tool overlays below. Each
-          click stays local until you press Apply — no LLM call is made.
+          If the inner trace below missed part of your tool or grabbed
+          background you can re-segment by adding clicks on the overlays.
+          Positive clicks mark regions that <em>are</em> the tool; negative
+          clicks mark regions that aren't. The clicks are sent to the
+          local SAM2 model as point prompts and re-run the trace — they
+          don't change tolerance, smoothing, or layout.
         </p>
         ${this._renderOverlayLegend()}
         <div class="overlay-grid">
@@ -2008,12 +2042,14 @@ class PicDownloads extends LitElement {
   static properties = {
     artifacts: { type: Object },
     artifactKey: { type: Number },
+    copyState: { state: true },   // "idle" | "copied" | "error"
   };
   createRenderRoot() { return this; }
 
   constructor() {
     super();
     this.artifactKey = 0;
+    this.copyState = "idle";
   }
 
   render() {
@@ -2022,11 +2058,55 @@ class PicDownloads extends LitElement {
     const withKey = (u) => `${u}?v=${k}`;
     return html`
       <div class="card">
-        <h2>Downloads</h2>
+        <h2>10. Proceed in Fusion</h2>
+        <p>
+          Your bin geometry is ready. To turn it into a printable 3D model,
+          open it in Fusion 360 with the Pic-to-Bin add-in:
+        </p>
+        <ol class="fusion-steps">
+          <li>
+            <strong>Install the add-in once</strong> (if you haven't already).
+            Clone or download the project, then from a terminal run
+            <code>pic-to-bin-fusion install</code>. This copies the add-in
+            and script into your Fusion <code>API/AddIns</code> and
+            <code>API/Scripts</code> folders.
+          </li>
+          <li>
+            <strong>Launch Fusion 360.</strong> The add-in registers a
+            "Gridfinity Pic-to-Bin" button under the
+            <em>Solid → Create</em> menu. (On first launch you may need to
+            open <em>Utilities → Add-Ins</em>, find Pic-to-Bin in the list,
+            and enable "Run on Startup".)
+          </li>
+          <li>
+            <strong>Click the Pic-to-Bin button.</strong> Fusion opens a
+            file picker.
+          </li>
+          <li>
+            <strong>Select the bin_config.json you downloaded below.</strong>
+            The add-in builds the parametric bin body, stacking lip, pocket,
+            finger slots, and gridfinity base pads in a new document — a
+            timeline group per phase so you can tweak features after the
+            fact.
+          </li>
+          <li>
+            <strong>Export &amp; print.</strong> Use Fusion's
+            <em>File → 3D Print</em> or <em>Export</em> to produce an STL
+            for your slicer. The body already has the
+            "ABS (White)" appearance applied so renders look like the final
+            print.
+          </li>
+        </ol>
+        <p class="hint">
+          Re-running the add-in on an edited <code>bin_config.json</code>
+          (e.g. after a redo) builds a fresh document — your prior tweaks
+          stay in the original file.
+        </p>
+        <h3 class="downloads-subhead">Downloads</h3>
         <div class="downloads">
           ${a.bin_config ? html`
             <a href=${withKey(a.bin_config)} download>
-              Bin config (JSON) — for the Fusion 360 add-in
+              Bin config (JSON) — open this with the Fusion add-in
             </a>` : nothing}
           ${a.layout_preview ? html`
             <a href=${withKey(a.layout_preview)} download>
@@ -2045,15 +2125,23 @@ class PicDownloads extends LitElement {
               Combined layout (DXF) — for CAD inspection
             </a>` : nothing}
         </div>
-        <p class="hint" style="margin-top:1rem">
-          Next: open Fusion 360 → Solid → Create → Gridfinity Pic-to-Bin →
-          load the bin_config.json.
-          <button class="info-link" type="button" style="margin-left:0.5rem"
-                  @click=${() => showInfo(this, "fit_test")}>
-            <span class="info-btn">i</span> About fit testing
-          </button>
+      </div>
+
+      <div class="card">
+        <h2>11. Save or start over</h2>
+        <p class="hint">
+          Bookmark or share this job's link to come back later — the URL
+          contains the job ID, and the server keeps job files for 24 hours
+          by default.
         </p>
-        <div class="actions" style="margin-top:1rem">
+        <div class="actions">
+          <button class="primary" type="button" @click=${this._onCopyLink}>
+            ${this.copyState === "copied"
+              ? "Link copied ✓"
+              : this.copyState === "error"
+                ? "Copy failed — copy from address bar"
+                : "Copy link to this job"}
+          </button>
           <button class="secondary" @click=${() => this.dispatchEvent(new CustomEvent("start-over"))}>
             Start a new bin
           </button>
@@ -2061,6 +2149,30 @@ class PicDownloads extends LitElement {
       </div>
     `;
   }
+
+  _onCopyLink = async () => {
+    const url = window.location.href;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        // Fallback for older browsers / non-secure contexts.
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (!ok) throw new Error("execCommand copy failed");
+      }
+      this.copyState = "copied";
+    } catch {
+      this.copyState = "error";
+    }
+    setTimeout(() => { this.copyState = "idle"; }, 2500);
+  };
 }
 
 customElements.define("pic-downloads", PicDownloads);
