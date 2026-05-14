@@ -50,13 +50,15 @@ SLOT_FLOOR_CLEARANCE_MM = 1.0
 DECK_INSET_MM = 2.0  # distance inside lip perimeter for deck lowering
 
 
-def compute_auto_height_units(tool_heights, height_units_override=None):
+def compute_auto_height_units(tool_heights, height_units_override=None,
+                              min_units_z=1):
     """Gridfinity height units (U) the bin will use, or None if undetermined.
 
     Mirrors the auto-sizing in ``build_config``: pick the smallest U such that
     the body above the floor (U×7 − base profile − 1 mm pocket floor) fits
     the tallest tool. ``height_units_override`` short-circuits the calculation
-    so a manual override surfaces consistently.
+    so a manual override surfaces consistently. ``min_units_z`` clamps the
+    auto result up to a floor (ignored when the override is set).
     """
     if height_units_override is not None:
         try:
@@ -88,7 +90,8 @@ def compute_auto_height_units(tool_heights, height_units_override=None):
         return None
     FLOOR_MIN_MM = 1.0
     min_bin_height = max_h + FLOOR_MIN_MM + BASE_PROFILE_HEIGHT_MM
-    return max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
+    auto_u = max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
+    return max(auto_u, max(1, int(min_units_z)))
 
 
 def bin_body_height_mm(height_units: int) -> float:
@@ -389,6 +392,7 @@ def _clip_to_bin_boundary(polys_mm: list, bin_width_mm: float,
 
 def build_config(layout: dict, tool_heights: dict | float,
                  height_units: int = None,
+                 min_units_z: int = 1,
                  stacking_lip: bool = True) -> dict:
     """Assemble the full JSON config for the Fusion 360 script.
 
@@ -397,6 +401,8 @@ def build_config(layout: dict, tool_heights: dict | float,
         tool_heights: tool heights in mm — either a single float (uniform)
                       or a dict mapping tool index to height in mm.
         height_units: gridfinity height units (auto-calculated if None)
+        min_units_z: floor on the auto-calculated height units (default 1).
+                     Ignored when ``height_units`` is set explicitly.
         stacking_lip: if False, omit the stacking lip (shorter overall bin
                       for shallow drawers). Pocket depth is unchanged.
     """
@@ -430,7 +436,8 @@ def build_config(layout: dict, tool_heights: dict | float,
         min_bin_height = (
             max(tool_height_values) + FLOOR_MIN_MM + BASE_PROFILE_HEIGHT_MM
         )
-        height_units = max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
+        auto_u = max(1, math.ceil(min_bin_height / HEIGHT_UNIT_MM))
+        height_units = max(auto_u, max(1, int(min_units_z)))
 
     bin_params = compute_bin_params(grid_x, grid_y, height_units)
     bin_d = bin_params["bin_body_height_mm"]
@@ -485,6 +492,7 @@ def build_config(layout: dict, tool_heights: dict | float,
 
 def prepare_bin(dxf_path: str, tool_heights: dict | float,
                 height_units: int = None,
+                min_units_z: int = 1,
                 stacking_lip: bool = True,
                 output_path: str = None) -> str:
     """Main pipeline: load layout DXF, compute params, write JSON config.
@@ -503,6 +511,7 @@ def prepare_bin(dxf_path: str, tool_heights: dict | float,
     config = build_config(
         layout, tool_heights,
         height_units=height_units,
+        min_units_z=min_units_z,
         stacking_lip=stacking_lip,
     )
 
@@ -564,6 +573,10 @@ def main():
                              "--tool-height 1=20.0)")
     parser.add_argument("--height-units", type=int, default=None,
                         help="Bin height in gridfinity units (auto if omitted)")
+    parser.add_argument("--min-units-z", type=int, default=1,
+                        help="Minimum Z grid size in gridfinity height units "
+                             "(default: 1). Floor on the auto height; ignored "
+                             "when --height-units is set.")
     parser.add_argument("--stacking", type=_parse_bool_arg, default=True,
                         metavar="true|false",
                         help="Generate stacking lip (default: true). Set "
@@ -579,6 +592,7 @@ def main():
         dxf_path=args.dxf_file,
         tool_heights=tool_heights,
         height_units=args.height_units,
+        min_units_z=args.min_units_z,
         stacking_lip=args.stacking,
         output_path=args.output,
     )

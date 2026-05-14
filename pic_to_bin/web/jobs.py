@@ -218,6 +218,7 @@ class JobState:
         return compute_auto_height_units(
             self.params.get("tool_heights"),
             self.params.get("height_units"),
+            min_units_z=self.params.get("min_units_z", 1) or 1,
         )
 
     def _artifact_urls(self) -> dict[str, str]:
@@ -1084,7 +1085,9 @@ _PIPELINE_PARAM_KEYS = {
     "gap",
     "bin_margin",
     "max_units",
-    "min_units",
+    "min_units_x",
+    "min_units_y",
+    "min_units_z",
     "height_units",
     "stacking",
     "slots",

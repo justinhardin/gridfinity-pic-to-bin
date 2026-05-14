@@ -120,7 +120,11 @@ optional:
                                   Drives the parallax-compensation scale-down.
   --gap MM                        Minimum gap between tools in layout, mm (default: 3.0)
   --bin-margin MM                 Extra clearance from tool extent to bin wall (default: 0)
-  --min-units N                   Minimum grid size per axis (default: 1)
+  --min-units-x N                 Minimum X grid size in units (default: 1)
+  --min-units-y N                 Minimum Y grid size in units (default: 1)
+  --min-units-z N                 Minimum Z grid size in height units (default: 1).
+                                  Floor on the auto height; ignored when
+                                  --height-units is set.
   --max-units N                   Max gridfinity grid size per axis (default: 7)
   --height-units N                Force bin height in gridfinity units (default: auto)
   --stacking BOOL                 Generate stacking lip (default: true). Set

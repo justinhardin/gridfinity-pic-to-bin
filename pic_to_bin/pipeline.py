@@ -103,7 +103,9 @@ def run_pipeline(
     gap: float = 3.0,
     bin_margin: float = 0.0,
     max_units: int = 7,
-    min_units: int = 1,
+    min_units_x: int = 1,
+    min_units_y: int = 1,
+    min_units_z: int = 1,
     height_units: Optional[int] = None,
     stacking: bool = True,
     slots: bool = True,
@@ -326,7 +328,8 @@ def run_pipeline(
         dxf_paths=dxf_paths,
         gap_mm=gap,
         max_units=max_units,
-        min_units=min_units,
+        min_units_x=min_units_x,
+        min_units_y=min_units_y,
         bin_margin_mm=bin_margin,
         output_dir=str(output_dir),
     )
@@ -361,6 +364,7 @@ def run_pipeline(
         dxf_path=layout_result["combined_dxf_path"],
         tool_heights=tool_heights,
         height_units=height_units,
+        min_units_z=min_units_z,
         stacking_lip=stacking,
         output_path=str(output_dir / "bin_config.json"),
     )
@@ -497,11 +501,21 @@ examples:
         "--max-units", type=int, default=7,
         help="Maximum grid size in gridfinity units per axis (default: 7)")
     parser.add_argument(
-        "--min-units", type=int, default=1,
-        help="Minimum grid size in gridfinity units per axis (default: 1). "
-             "Forces the bin to at least min_units x min_units even if the "
-             "tools would fit in a smaller grid. Useful to match an existing "
+        "--min-units-x", type=int, default=1,
+        help="Minimum X grid size in gridfinity units (default: 1). "
+             "Forces the bin to be at least this wide even if the tools "
+             "would fit in a smaller grid. Useful to match an existing "
              "drawer slot or other bins in the same set.")
+    parser.add_argument(
+        "--min-units-y", type=int, default=1,
+        help="Minimum Y grid size in gridfinity units (default: 1). "
+             "Forces the bin to be at least this tall even if the tools "
+             "would fit in a smaller grid.")
+    parser.add_argument(
+        "--min-units-z", type=int, default=1,
+        help="Minimum Z grid size in gridfinity height units (default: 1). "
+             "Floor on the auto-calculated bin height. Ignored when "
+             "--height-units is set (which forces an exact height).")
     parser.add_argument(
         "--height-units", type=int, default=None,
         help="Force bin height in gridfinity units (default: auto)")
@@ -586,7 +600,9 @@ examples:
         gap=args.gap,
         bin_margin=args.bin_margin,
         max_units=args.max_units,
-        min_units=args.min_units,
+        min_units_x=args.min_units_x,
+        min_units_y=args.min_units_y,
+        min_units_z=args.min_units_z,
         height_units=args.height_units,
         stacking=args.stacking,
         slots=args.slots,

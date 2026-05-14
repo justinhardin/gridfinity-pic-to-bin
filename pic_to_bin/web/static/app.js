@@ -18,7 +18,9 @@ const FORM_DEFAULTS = {
   gap: 3.0,
   bin_margin: 0.0,
   max_units: 7,
-  min_units: 1,
+  min_units_x: 1,
+  min_units_y: 1,
+  min_units_z: 1,
   height_units: "",
   stacking: true,
   slots: true,
@@ -148,14 +150,34 @@ const FIELD_INFO = {
       "Higher → bin bumps up to the next 42 mm unit sooner, giving more breathing room between tool and wall — useful if your prints distort near the edges. Lower (or 0) → smallest possible bin; tools may sit right against the wall when the snap slack is small.",
     ],
   },
-  min_units: {
-    title: "Minimum grid units",
-    hint: "Smallest bin footprint per axis (gridfinity units, 42 mm each).",
+  min_units_x: {
+    title: "Minimum grid units X",
+    hint: "Smallest bin width in gridfinity units (42 mm each).",
     body: [
-      "Force the bin to be at least this many units wide and tall, even if the tool would fit in something smaller.",
+      "Force the bin to be at least this many units wide, even if the tool would fit in a narrower one.",
       "Useful when you want the bin to match an existing drawer slot or to look uniform alongside other bins in a set.",
       "Typical range: 1 to 7 (must be ≤ max_units). Default: 1.",
-      "Higher → bin is at least N×N units even for a small tool, so it slots into a fixed drawer layout — at the cost of using more filament and bench space. Lower → bin shrinks to the tightest gridfinity unit count that fits the tool.",
+      "Higher → bin is at least N units wide even for a narrow tool, so it slots into a fixed drawer layout — at the cost of using more filament and bench space. Lower → bin shrinks to the tightest unit count that fits the tool's width.",
+    ],
+  },
+  min_units_y: {
+    title: "Minimum grid units Y",
+    hint: "Smallest bin depth in gridfinity units (42 mm each).",
+    body: [
+      "Force the bin to be at least this many units deep (along the Y axis), even if the tool would fit in a shorter one.",
+      "Useful when you want the bin to match an existing drawer slot or to look uniform alongside other bins in a set.",
+      "Typical range: 1 to 7 (must be ≤ max_units). Default: 1.",
+      "Higher → bin is at least N units deep even for a short tool. Lower → bin shrinks to the tightest unit count that fits the tool's length.",
+    ],
+  },
+  min_units_z: {
+    title: "Minimum grid units Z",
+    hint: "Smallest bin height in gridfinity height units (7 mm each).",
+    body: [
+      "Force the bin to be at least this many height units tall (each = 7 mm), even if a shorter bin would fit the tool.",
+      "Useful for matching the height of existing bins in a stack. Ignored when \"Bin height (units)\" is set explicitly — that field forces an exact height.",
+      "Typical range: 1 to 12. Default: 1 (no floor; the pipeline picks the smallest height that fits the tool).",
+      "Higher → bin is at least N units tall even for a short tool, so it lines up with neighbouring bins; the tool sits lower in a deeper pocket. Lower (1) → bin shrinks to the shortest height that fits.",
     ],
   },
   max_units: {
@@ -164,7 +186,7 @@ const FIELD_INFO = {
     body: [
       "Cap on how big the bin can grow per axis. If the tools don't fit in this size the pipeline raises an error rather than silently producing a giant bin.",
       "Default 7×7 is plenty for most hand tools.",
-      "Typical range: 2 to 12 (must be ≥ min_units). Default: 7.",
+      "Typical range: 2 to 12 (must be ≥ min_units_x and min_units_y). Default: 7.",
       "Higher → larger tools or multi-tool layouts are allowed to spawn larger bins. Lower → packing fails fast with an actionable error instead of producing a bin that won't fit your gridfinity baseplate.",
     ],
   },
@@ -955,7 +977,11 @@ class PicForm extends LitElement {
 
         <h3 class="advanced-subhead">Bin sizing</h3>
         <div class="field-row">
-          ${this._renderField("min_units", "number", { step: 1 })}
+          ${this._renderField("min_units_x", "number", { step: 1 })}
+          ${this._renderField("min_units_y", "number", { step: 1 })}
+          ${this._renderField("min_units_z", "number", { step: 1 })}
+        </div>
+        <div class="field-row">
           ${this._renderField("max_units", "number", { step: 1 })}
           ${this._renderField("height_units", "number", { step: 1, placeholder: "auto" })}
         </div>

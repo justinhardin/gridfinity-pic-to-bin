@@ -506,7 +506,8 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
                       gridfinity_unit: float = 42.0,
                       max_units: int = 7,
                       bin_margin_mm: float = 12.0,
-                      min_units: int = 1,
+                      min_units_x: int = 1,
+                      min_units_y: int = 1,
                       ) -> tuple[list[PlacedTool], int, int]:
     """Pack tools into the smallest gridfinity bin.
 
@@ -524,10 +525,10 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
     extent by 2*bin_margin_mm before snap-to-grid pushes the bin one unit
     bigger when a tool is within bin_margin_mm of the boundary.
 
-    min_units sets a floor on each axis. The packer still picks the
-    smallest fit, but the final grid is clamped up to min_units × min_units
-    so the bin never comes out smaller than requested. Tool centering runs
-    after clamping, so the extra slack distributes evenly.
+    min_units_x / min_units_y set a per-axis floor. The packer still picks
+    the smallest fit, but the final grid is clamped up so the bin never comes
+    out smaller than requested on either axis. Tool centering runs after
+    clamping, so the extra slack distributes evenly.
 
     Returns:
         (placed_tools, grid_units_x, grid_units_y)
@@ -666,9 +667,8 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
 
     # Apply minimum bin size before centering so the slack from any clamped
     # axis distributes evenly around the tools.
-    min_units = max(1, int(min_units))
-    units_x = max(units_x, min_units)
-    units_y = max(units_y, min_units)
+    units_x = max(units_x, max(1, int(min_units_x)))
+    units_y = max(units_y, max(1, int(min_units_y)))
 
     # Center tools within the bin (both axes)
     bin_w = units_x * gridfinity_unit
@@ -979,7 +979,8 @@ def _svg_set_mm_dimensions(svg_path: str, width_mm: float, height_mm: float) -> 
 def layout_tools(dxf_paths: list[str], gap_mm: float = 3.0,
                  gridfinity_unit: float = 42.0, max_units: int = 7,
                  bin_margin_mm: float = 12.0,
-                 min_units: int = 1,
+                 min_units_x: int = 1,
+                 min_units_y: int = 1,
                  output_dir: str = None) -> dict:
     """Main pipeline: load DXFs, pack, write combined DXF + preview."""
     if output_dir is None:
@@ -1001,7 +1002,7 @@ def layout_tools(dxf_paths: list[str], gap_mm: float = 3.0,
     placed, units_x, units_y = pack_tools_greedy(
         tools, gap_mm=gap_mm, gridfinity_unit=gridfinity_unit,
         max_units=max_units, bin_margin_mm=bin_margin_mm,
-        min_units=min_units)
+        min_units_x=min_units_x, min_units_y=min_units_y)
 
     bin_w = units_x * gridfinity_unit
     bin_h = units_y * gridfinity_unit
@@ -1063,10 +1064,14 @@ def main():
                         help="Gridfinity unit size in mm (default: 42.0)")
     parser.add_argument("--max-units", type=int, default=7,
                         help="Maximum grid size in units (default: 7)")
-    parser.add_argument("--min-units", type=int, default=1,
-                        help="Minimum grid size in units per axis (default: 1). "
-                             "Forces the bin to at least min_units x min_units, "
-                             "even if the tools fit in a smaller grid.")
+    parser.add_argument("--min-units-x", type=int, default=1,
+                        help="Minimum X grid size in units (default: 1). "
+                             "Forces the bin to be at least this wide even if "
+                             "the tools would fit in a smaller grid.")
+    parser.add_argument("--min-units-y", type=int, default=1,
+                        help="Minimum Y grid size in units (default: 1). "
+                             "Forces the bin to be at least this tall even if "
+                             "the tools would fit in a smaller grid.")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: generated/)")
 
@@ -1077,7 +1082,8 @@ def main():
         gap_mm=args.gap,
         gridfinity_unit=args.grid_unit,
         max_units=args.max_units,
-        min_units=args.min_units,
+        min_units_x=args.min_units_x,
+        min_units_y=args.min_units_y,
         output_dir=args.output_dir,
     )
 
