@@ -392,18 +392,25 @@ def _make_footprint(polygons, resolution, half_gap):
 
 
 def _polygon_pack(tools, gap_mm, max_width_mm, max_height_mm,
-                  resolution=1.0):
+                  resolution=1.0, gridfinity_unit=42.0):
     """Bottom-left fill packing using rasterized polygon collision.
 
     Places tools one at a time (largest first). For each tool, scans positions
-    bottom-to-top, left-to-right, and picks the first valid position that
-    minimizes the snapped gridfinity grid area.
+    bottom-to-top, left-to-right, and picks the position that minimises the
+    tuple score ``(grid_area, -min_wall_slack)``. The secondary term is the
+    smaller of (bin_width − x_extent) and (bin_height − y_extent) — i.e. how
+    far the tool cluster sits from the nearest bin wall after the bin is
+    rounded up to whole gridfinity units. With ties on grid area, this prefers
+    layouts that leave generous wall clearance instead of squeezing one extra
+    tool against the bin edge (which then forces thin-wall snapping at the
+    stacking lip).
 
     Args:
         tools: list of ToolProfile (already transformed)
         gap_mm: minimum gap between tools in mm
         max_width_mm, max_height_mm: bin limits in mm
         resolution: grid cell size in mm
+        gridfinity_unit: grid pitch in mm (used to evaluate wall clearance)
 
     Returns:
         list of (x, y) positions in mm, or None if placement fails
@@ -438,7 +445,7 @@ def _polygon_pack(tools, gap_mm, max_width_mm, max_height_mm,
         th = tool.bbox["height_mm"]
 
         best_pos = None
-        best_score = float("inf")
+        best_score = (float("inf"), 0.0)
 
         # Search bounds
         if i == 0:
@@ -458,19 +465,27 @@ def _polygon_pack(tools, gap_mm, max_width_mm, max_height_mm,
 
             # Early exit: minimum possible score at this Y level
             y_extent = max(cur_max_y, wy + th)
-            y_units = snap_to_grid(y_extent)
+            y_units = snap_to_grid(y_extent, gridfinity_unit)
             min_x_extent = max(cur_max_x, tw)  # best case: tool at x=0
-            min_x_units = snap_to_grid(min_x_extent)
-            if min_x_units * y_units >= best_score:
+            min_x_units = snap_to_grid(min_x_extent, gridfinity_unit)
+            min_slack_x = min_x_units * gridfinity_unit - min_x_extent
+            slack_y = y_units * gridfinity_unit - y_extent
+            min_score = (min_x_units * y_units,
+                         -min(min_slack_x, slack_y))
+            if min_score >= best_score:
                 break
 
             for wx_i in range(x_steps):
                 wx = wx_i * resolution
 
-                # Early exit: score can only grow as X increases
+                # Within a fixed Y, primary score (x_units * y_units) is
+                # monotonically non-decreasing in X, and the secondary
+                # (-min_slack) is non-decreasing within each x_units band.
+                # So once score >= best, every larger X is also >= best.
                 x_extent = max(cur_max_x, wx + tw)
-                x_units = snap_to_grid(x_extent)
-                score = x_units * y_units
+                x_units = snap_to_grid(x_extent, gridfinity_unit)
+                slack_x = x_units * gridfinity_unit - x_extent
+                score = (x_units * y_units, -min(slack_x, slack_y))
                 if score >= best_score:
                     break
 
@@ -621,13 +636,14 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
     # Phase 2: Polygon pack top candidates
     top_n = min(30, len(candidates))
     best_result = None
-    best_area = float("inf")
+    best_score = (float("inf"), 0.0)
 
     for cand in candidates[:top_n]:
         combo = cand["combo"]
         ordered_tools = [transforms[idx][combo[idx]] for idx in tool_order]
 
-        positions = _polygon_pack(ordered_tools, gap_mm, max_w, max_h)
+        positions = _polygon_pack(ordered_tools, gap_mm, max_w, max_h,
+                                  gridfinity_unit=gridfinity_unit)
         if positions is None:
             continue
 
@@ -641,9 +657,13 @@ def pack_tools_greedy(tools: list[ToolProfile], gap_mm: float = 3.0,
         if ux > max_units or uy > max_units:
             continue
 
-        area = ux * uy
-        if area < best_area:
-            best_area = area
+        # Tiebreaker on equal grid area: prefer layouts with more wall slack,
+        # matching the per-placement tiebreaker inside _polygon_pack.
+        wall_slack = min(ux * gridfinity_unit - total_w,
+                         uy * gridfinity_unit - total_h)
+        score = (ux * uy, -wall_slack)
+        if score < best_score:
+            best_score = score
             best_result = (combo, positions, ux, uy)
 
     # Fallback: use shelf packing result from the best candidate
