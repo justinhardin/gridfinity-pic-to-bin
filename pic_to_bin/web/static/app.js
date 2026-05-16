@@ -269,16 +269,6 @@ const FIELD_INFO = {
       "Sharp corners are preserved automatically by curvature-aware blending regardless of this value, but moderately curved features still soften at higher settings. Default 2.5 mm balances both cases.",
     ],
   },
-  template_setup: {
-    title: "Print the ArUco template",
-    hint: "Print one of the templates below at 100% scale before taking photos.",
-    body: [
-      "Every photo must include the printed ArUco template — the eight markers around the edge tell the pipeline how to remove perspective and how many millimeters every pixel represents.",
-      "Pick the paper size that matches what's loaded in your printer. A5, US Letter, and US Legal are all supported. Print at 100% scale (or \"Actual size\") — never \"Fit to page,\" since that rescales the markers and breaks the calibration.",
-      "Background color: pick White if you want the lowest ink usage, or Green (#00B140 chroma-key) if your tool is light-colored or has reflective metal that SAM2 sometimes confuses with a white background. The green variant prints small white pads behind each marker so detection still works.",
-      "Each template is reusable — print once, photograph as many tools as you like.",
-    ],
-  },
   fit_test: {
     title: "Print at actual size to test fit",
     hint: "Print, lay the tool on top, and verify before 3D printing.",
@@ -913,8 +903,6 @@ class PicForm extends LitElement {
       this.files.every(f => f.toolHeight != null && f.toolHeight !== "" && !isNaN(f.toolHeight));
     const submitDisabled = !allHeightsSet || this.running;
     return html`
-      ${this._renderTemplateSetup()}
-
       <div class="card">
         <div class="card-header">
           <h2>1. Part name <span class="card-h2-sub">(optional)</span></h2>
@@ -1059,62 +1047,6 @@ class PicForm extends LitElement {
           </div>
         `)}
       </div>
-    `;
-  }
-
-  _renderTemplateSetup() {
-    const size = this._templateSize ?? "letter";
-    const bg = this._templateBg ?? "white";
-    const href = `/static/templates/template_${size}_${bg}.pdf`;
-    const filename = `pic_to_bin_template_${size}_${bg}.pdf`;
-    const sizeOptions = [
-      { value: "letter", label: "US Letter (8.5 × 11 in)" },
-      { value: "legal",  label: "US Legal (8.5 × 14 in)" },
-      { value: "a5",     label: "A5 (148 × 210 mm)" },
-    ];
-    const bgOptions = [
-      { value: "white", label: "White" },
-      { value: "green", label: "Chroma-key green (#00B140)" },
-    ];
-    return html`
-      <details class="card advanced-card setup-card">
-        <summary class="advanced-summary">
-          <h2>0. Setup <span class="card-h2-sub">— print template</span></h2>
-          <span class="advanced-toggle-hint">Click to expand</span>
-        </summary>
-        <div class="card-header" style="margin: 0 0 0.5rem;">
-          <span class="field-label" style="font-weight: 600;">Download a printable ArUco template</span>
-          ${this._renderInfoLink("template_setup", "About this step")}
-        </div>
-        <p class="hint section-hint">
-          Print at 100% scale (no fit-to-page). Each photo must include this
-          template — its markers calibrate scale and correct perspective. The
-          green variant helps SAM2 segment light or reflective tools.
-        </p>
-        <div class="field-row">
-          <div class="field">
-            <label><span class="field-label">Paper size</span></label>
-            <select @change=${(e) => { this._templateSize = e.target.value; this.requestUpdate(); }}>
-              ${sizeOptions.map(o => html`
-                <option value=${o.value} ?selected=${o.value === size}>${o.label}</option>
-              `)}
-            </select>
-          </div>
-          <div class="field">
-            <label><span class="field-label">Background</span></label>
-            <select @change=${(e) => { this._templateBg = e.target.value; this.requestUpdate(); }}>
-              ${bgOptions.map(o => html`
-                <option value=${o.value} ?selected=${o.value === bg}>${o.label}</option>
-              `)}
-            </select>
-          </div>
-        </div>
-        <div class="actions" style="margin-top: 0.75rem;">
-          <a class="primary button-link" href=${href} download=${filename}>
-            Download template (PDF)
-          </a>
-        </div>
-      </details>
     `;
   }
 
@@ -2092,10 +2024,12 @@ class PicDownloads extends LitElement {
         <ol class="fusion-steps">
           <li>
             <strong>Install the add-in once</strong> (if you haven't already).
-            Clone or download the project, then from a terminal run
-            <code>pic-to-bin-fusion install</code>. This copies the add-in
-            and script into your Fusion <code>API/AddIns</code> and
-            <code>API/Scripts</code> folders.
+            <a href="/download/fusion-addin.zip" download>Download the
+            ZIP</a> and drop its <code>AddIns/pic_to_bin</code> folder
+            into your Fusion <code>API/AddIns</code> directory — full
+            steps live in <code>INSTALL.txt</code> inside the ZIP.
+            (If you have the Python package installed locally,
+            <code>pic-to-bin-fusion install</code> does the same thing.)
           </li>
           <li>
             <strong>Launch Fusion 360.</strong> The add-in registers a

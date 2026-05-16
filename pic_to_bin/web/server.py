@@ -2,7 +2,9 @@
 
 Endpoints
 ---------
-GET  /                          → static index.html
+GET  /                          → static home.html (marketing / instructions)
+GET  /app                       → static index.html (the Lit app)
+GET  /download/fusion-addin.zip → zipped Fusion 360 script+add-in for manual install
 GET  /static/{path}             → static assets (JS, CSS, vendored Lit)
 POST /jobs                      → create job (multipart: images + JSON params)
 GET  /jobs/{id}                 → job summary (status, artifact URLs)
@@ -17,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import logging
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -109,14 +113,13 @@ def create_app(
             }
         }
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
+    def _serve_html(filename: str, assets: tuple[str, ...]) -> HTMLResponse:
         # Cache-bust the JS/CSS by appending each file's mtime as a query
         # string. The browser caches them happily when unchanged but
         # re-fetches as soon as we edit the source — no manual hard-refresh.
-        index_path = STATIC_DIR / "index.html"
-        html_text = index_path.read_text(encoding="utf-8")
-        for asset in ("app.js", "styles.css"):
+        path = STATIC_DIR / filename
+        html_text = path.read_text(encoding="utf-8")
+        for asset in assets:
             asset_path = STATIC_DIR / asset
             if asset_path.exists():
                 v = int(asset_path.stat().st_mtime)
@@ -125,6 +128,34 @@ def create_app(
                 )
         return HTMLResponse(
             html_text, headers={"cache-control": "no-cache"}
+        )
+
+    @app.get("/", response_class=HTMLResponse)
+    async def home() -> HTMLResponse:
+        # Public landing page — explains the workflow, links to /app for
+        # the actual tool. No Lit dependency, so this stays fast on first
+        # load and renders before any third-party CDN has a chance to fail.
+        return _serve_html("home.html", ("styles.css",))
+
+    @app.get("/app", response_class=HTMLResponse)
+    async def app_page() -> HTMLResponse:
+        return _serve_html("index.html", ("app.js", "styles.css"))
+
+    @app.get("/download/fusion-addin.zip")
+    async def download_fusion_addin() -> Response:
+        # Bundle the Fusion 360 script + add-in into a ZIP so hosted users
+        # (who don't have the Python package installed) can drop it into
+        # their Fusion API folders by hand. Built in-memory each call so
+        # it always reflects the currently-deployed code — no stale
+        # committed ZIP to remember to refresh.
+        return Response(
+            content=_build_fusion_addin_zip(),
+            media_type="application/zip",
+            headers={
+                "content-disposition":
+                    'attachment; filename="pic-to-bin-fusion.zip"',
+                "cache-control": "no-cache",
+            },
         )
 
     # ---- Job endpoints -----------------------------------------------------
@@ -523,6 +554,96 @@ def create_app(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
     return app
+
+
+# ---------------------------------------------------------------------------
+# Fusion add-in ZIP bundle
+# ---------------------------------------------------------------------------
+
+_PACKAGE_ROOT = Path(__file__).parent.parent  # …/pic_to_bin
+_FUSION_ADDIN_DIR = _PACKAGE_ROOT / "pic_to_bin_addin"
+
+_FUSION_INSTALL_TXT = """\
+Pic-to-Bin — Fusion 360 add-in install
+=======================================
+
+This ZIP contains the Pic-to-Bin Fusion 360 add-in. After a ~30-second
+one-time install you can build a Gridfinity bin from the web app's
+bin_config.json in a single click.
+
+Inside the ZIP
+--------------
+  AddIns/pic_to_bin/    ← drop into <Fusion API>/AddIns/
+
+Where is the Fusion API directory?
+-----------------------------------
+  Windows : %APPDATA%\\Autodesk\\Autodesk Fusion 360\\API
+            (paste that into the File Explorer address bar)
+  macOS   : ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API
+
+Install (one-time)
+------------------
+  1. Open the Fusion API folder above. You should see an AddIns/ folder
+     inside it (Fusion creates it on first run; if it doesn't exist,
+     create it).
+  2. Copy this ZIP's AddIns/pic_to_bin folder into <API>/AddIns/
+     (so the path ends with .../AddIns/pic_to_bin/pic_to_bin.py).
+  3. Launch Fusion 360. Press Shift+S → Add-Ins tab → select
+     'pic_to_bin' → click Run. Tick "Run on Startup" so the button
+     shows up every session.
+  4. In a Design workspace, the new "Gridfinity Pic-to-Bin" button
+     appears under Solid → Create.
+
+Use it
+------
+  1. In the Pic-to-Bin web app, finish a job and download the
+     bin_config.json file.
+  2. In Fusion, click Solid → Create → Gridfinity Pic-to-Bin.
+  3. Select the bin_config.json. Fusion builds the parametric bin
+     in seconds — every phase lives in its own named timeline group
+     so you can keep editing afterward.
+  4. File → 3D Print (or Export → STL) to feed your slicer.
+
+Upgrades
+--------
+  This ZIP always reflects the currently-deployed server. To upgrade,
+  re-download from the web app's Step 0 link and overwrite the
+  AddIns/pic_to_bin folder.
+
+Source: https://github.com/justinhardin/gridfinity-pic-to-bin
+"""
+
+
+def _build_fusion_addin_zip() -> bytes:
+    """Bundle pic_to_bin_addin into a self-installable ZIP.
+
+    Matches the layout that ``fusion_install.py`` would write into the
+    Fusion API folder, but boxed up for users who don't have the Python
+    package installed locally.
+    """
+    if not _FUSION_ADDIN_DIR.is_dir():
+        # Should only happen in odd dev installs; surfacing as 500 is fine.
+        raise RuntimeError(
+            f"Fusion add-in dir not found at {_FUSION_ADDIN_DIR}"
+        )
+
+    buf = io.BytesIO()
+    skip_dirs = {"__pycache__", ".vscode"}
+
+    def add_tree(src_dir: Path, arc_prefix: str) -> None:
+        for entry in sorted(src_dir.rglob("*")):
+            if any(part in skip_dirs or part.startswith(".")
+                   for part in entry.relative_to(src_dir).parts):
+                continue
+            if entry.is_file():
+                rel = entry.relative_to(src_dir).as_posix()
+                zf.writestr(f"{arc_prefix}/{rel}", entry.read_bytes())
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("INSTALL.txt", _FUSION_INSTALL_TXT)
+        add_tree(_FUSION_ADDIN_DIR, "AddIns/pic_to_bin")
+
+    return buf.getvalue()
 
 
 async def _periodic_sweep(job_manager: JobManager, interval_seconds: float = 1800.0):

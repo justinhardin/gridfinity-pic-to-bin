@@ -251,31 +251,28 @@ prepare-bin generated/combined_layout.dxf --tool-height 17
 
 ## Fusion 360 integration
 
-`pic-to-bin` ships in two flavors for Fusion 360 — a **toolbar add-in** (recommended) and a classic **script**. One install command sets up both:
+`pic-to-bin` ships a Fusion 360 **add-in** that exposes a toolbar button. Two install paths:
+
+**A. Python install (developers):**
 
 ```bash
 pic-to-bin-fusion install
 ```
 
-This copies the add-in to `…/API/AddIns/pic_to_bin/` and the script to `…/API/Scripts/pic_to_bin/`, sharing the build code (`_bin_builder.py`) between them.
+Copies the add-in to `…/API/AddIns/pic_to_bin/`.
 
-### Add-in (recommended) — toolbar button
+**B. ZIP install (hosted web users):**
+
+In the web app, click the **Download Fusion add-in (.zip)** button on the home page. Extract the ZIP and drag its `AddIns/pic_to_bin` folder into your Fusion API directory. Full steps live in `INSTALL.txt` inside the ZIP.
+
+### Enable the add-in in Fusion
 
 1. Open Fusion 360.
 2. Press **Shift+S → Add-Ins tab**.
 3. Select **pic_to_bin → Run** (toggle **Run on Startup** to keep the button available every session).
 4. In a Design workspace, the **Solid > Create** panel now contains a **Gridfinity Pic-to-Bin** button.
-5. Click the button. The script auto-loads `<project>/generated/bin_config.json` if it exists; otherwise a file dialog opens defaulting to your Desktop.
+5. Click the button. It auto-loads `<project>/generated/bin_config.json` if it exists; otherwise a file dialog opens defaulting to your Desktop.
 6. Bin gets built, exported as STL + STEP, and a viewport screenshot is saved alongside `bin_config.json`.
-
-### Script form (alternate)
-
-If you prefer the classic Scripts dialog:
-
-1. Press **Shift+S → Scripts tab**.
-2. Select **pic_to_bin → Run**.
-
-The behavior is identical to the add-in button.
 
 ### What gets built
 
@@ -290,7 +287,7 @@ The bin is generated in a fresh document with these timeline groups for easy nav
 
 ### Reinstalling and reload
 
-Re-running `pic-to-bin-fusion install` overwrites both folders. The script and add-in entry points reload `_bin_builder.py` from disk on every invocation, so most code changes land on the next button click without restarting Fusion. Only changes to the entry-point files themselves (`pic_to_bin_script/pic_to_bin.py` or `pic_to_bin_addin/pic_to_bin.py`) require a Stop/Run on the add-in or a Fusion restart.
+Re-running `pic-to-bin-fusion install` (or re-extracting the ZIP) overwrites the add-in folder. The add-in entry point reloads `_bin_builder.py` from disk on every click, so most code changes land on the next button press without restarting Fusion. Only changes to `pic_to_bin_addin/pic_to_bin.py` itself need a Stop/Run on the add-in or a Fusion restart.
 
 ### Uninstall
 
@@ -298,7 +295,7 @@ Re-running `pic-to-bin-fusion install` overwrites both folders. The script and a
 pic-to-bin-fusion uninstall
 ```
 
-Removes both the script and the add-in.
+Removes the add-in (and cleans up the legacy `Scripts/pic_to_bin` folder if you installed before the add-in-only consolidation).
 
 ---
 
@@ -311,9 +308,9 @@ Removes both the script and the add-in.
 | `ScaleInconsistencyError: H/V scales differ >5%` | Template not printed at 100% | Reprint with fit-to-page disabled |
 | `WARNING: Low effective DPI (<100)` | Camera too far away | Hold phone closer; use higher resolution mode |
 | Tools don't fit in grid | Tools too large for `--max-units` | Increase `--max-units` |
-| Fusion freezes building pockets | Stale cached `_bin_builder` after editing | The reload is already wired in — just click the button again. If still stuck, restart Fusion. |
-| Pocket fits too loose | Default `--tolerance 0` produces 2 mm physical clearance + 1 mm at each tip | Lower with `--tolerance -0.5` and/or `--axial-tolerance 0.5` |
-| Pocket fits too tight at the tool's tips only | SAM2 under-detected the tapered ends | Increase `--axial-tolerance` (default 1) |
+| Fusion freezes building pockets | Stale cached `_bin_builder` after editing | The reload runs on every click — just click the button again. If still stuck, restart Fusion. |
+| Pocket fits too loose | Default `--tolerance 0` produces 2 mm physical clearance + ≥2 mm at each tip | Lower with `--tolerance -0.5` and/or `--axial-tolerance 1.0` |
+| Pocket fits too tight at the tool's tips only | SAM2 under-detected the tapered ends | Increase `--axial-tolerance` (default 'auto', 2 mm floor) |
 | Pocket fits too tight everywhere | Trace itself is short (shadow halo, parallax, mask erosion) | First try `--tolerance 1` (= 3 mm physical). If still tight, check `--phone-height` matches your shooting distance |
 
 ### Common photo issues

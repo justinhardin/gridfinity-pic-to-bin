@@ -58,7 +58,7 @@ Layout Packing (layout_tools.py)
 Bin Config Generation (prepare_bin.py)
     [center cutout in bin → JSON config]
          ↓
-EITHER:  Fusion 360 Add-In / Script (pic_to_bin_addin/ or pic_to_bin_script/)
+EITHER:  Fusion 360 Add-In (pic_to_bin_addin/)
     [parametric bin body + ABS-white appearance + pockets + slots + base pads]
          ↓  STL / STEP / PNG preview
 OR:     Web app (pic_to_bin/web/) — FastAPI + Lit
@@ -82,22 +82,20 @@ gridfinity-pic-to-bin/
         validate_trace.py            # Trace validation
         layout_tools.py              # Layout packing + fit-test PDF/SVG generation
         prepare_bin.py               # Centering + Fusion config generation
-        fusion_install.py            # Installs script AND add-in into Fusion
+        fusion_install.py            # Installs the add-in into Fusion's AddIns dir
         web/                         # FastAPI + Lit web wrapper
             __init__.py
             jobs.py                  # JobManager: UUID registry, GPU semaphore, SSE
-            server.py                # FastAPI routes + uvicorn cli()
+            server.py                # FastAPI routes + uvicorn cli() + Fusion ZIP builder
             vendor_lit.py            # `python -m … vendor_lit` to vendor Lit locally
             static/
-                index.html           # Importmap-based Lit loader
+                home.html            # Public landing page at /
+                index.html           # Importmap-based Lit loader at /app
                 app.js               # PicApp / Form / Progress / Preview / Downloads
                 styles.css
-        pic_to_bin_script/           # Fusion 360 script form
-            pic_to_bin.py            # script entry point
-            pic_to_bin.manifest      # type: "script"
-            _bin_builder.py          # shared build logic (also copied into addin)
-        pic_to_bin_addin/            # Fusion 360 add-in form (toolbar button)
+        pic_to_bin_addin/            # Fusion 360 add-in (only Fusion entry point)
             pic_to_bin.py            # add-in entry (registers Solid > Create button)
+            _bin_builder.py          # build logic — sketches, timeline groups, exports
             pic_to_bin.manifest      # type: "addin"
             resources/pic_to_bin/    # toolbar icons
                 16x16.png
@@ -128,10 +126,9 @@ gridfinity-pic-to-bin/
 | `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving |
 | `web/static/app.js` | Lit components: `pic-app` (root, owns modal + history), `pic-form`, `pic-progress`, `pic-preview` (with fit-test card), `pic-downloads`. `FIELD_INFO` map drives the (i) info modals |
 | `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into `static/` and rewrites the `index.html` import map |
-| `pic_to_bin_script/_bin_builder.py` | Shared Fusion build code — sketch consolidation, named timeline groups, ABS (White) appearance, STL/STEP/PNG export |
-| `pic_to_bin_script/pic_to_bin.py` | Thin script entry — picks `bin_config.json` and calls `_bin_builder.build_bin()` |
 | `pic_to_bin_addin/pic_to_bin.py` | Add-in entry — registers a "Gridfinity Pic-to-Bin" button in Solid > Create |
-| `fusion_install.py` | `pic-to-bin-fusion install` copies the script into `…/API/Scripts/pic_to_bin/` AND the add-in into `…/API/AddIns/pic_to_bin/`, copying `_bin_builder.py` into both |
+| `pic_to_bin_addin/_bin_builder.py` | Fusion build code — sketch consolidation, named timeline groups, ABS (White) appearance, STL/STEP/PNG export |
+| `fusion_install.py` | `pic-to-bin-fusion install` copies the add-in into `…/API/AddIns/pic_to_bin/`. Uninstall also cleans up the legacy `…/API/Scripts/pic_to_bin/` folder for users who installed pre-consolidation. |
 
 ## Template Design
 
@@ -173,7 +170,7 @@ gridfinity-pic-to-bin/
 
 ## Fusion 360 Build Geometry
 
-The Fusion side (`_bin_builder.py`) builds the bin in a new document with these phases, each wrapped in a named timeline group:
+The Fusion side (`pic_to_bin_addin/_bin_builder.py`) builds the bin in a new document with these phases, each wrapped in a named timeline group:
 
 1. **Bin Body** — single rectangular extrude. Body gets the Fusion appearance "ABS (White)" applied immediately.
 2. **Stacking Lip** (optional, toggle via `--stacking false`) — solid block + 4 mm fillet + base-profile inverse cutout + 0.6 mm top recess.
@@ -182,7 +179,7 @@ The Fusion side (`_bin_builder.py`) builds the bin in a new document with these 
 5. **Finger Slots** — one sketch per tool containing all slot polys, single Cut extrude per tool, same depth as the pocket.
 6. **Base Pads** — single sketch with all wide-pad rounded rects + single Join extrude, then chamfer; same pattern for narrow posts. For an N×M grid this is 2 sketches + 2 extrudes + 2 chamfers regardless of N×M.
 
-Both entry points (`pic_to_bin_script/pic_to_bin.py` and `pic_to_bin_addin/pic_to_bin.py`) call `importlib.reload(_bin_builder)` on each invocation so edits to `_bin_builder.py` land on the next click without restarting Fusion. The file dialog defaults to the user's Desktop (Windows `%USERPROFILE%\Desktop` / macOS `~/Desktop`) when no `<project>/generated/bin_config.json` is found.
+The add-in entry point (`pic_to_bin_addin/pic_to_bin.py`) calls `importlib.reload(_bin_builder)` on every click so edits to `_bin_builder.py` land on the next button press without restarting Fusion. The file dialog defaults to the user's Desktop (Windows `%USERPROFILE%\Desktop` / macOS `~/Desktop`) when no `<project>/generated/bin_config.json` is found.
 
 ## Usage
 

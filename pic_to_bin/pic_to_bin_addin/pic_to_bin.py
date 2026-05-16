@@ -2,7 +2,7 @@
 
 Registers a "Gridfinity Pic-to-Bin" command in the Solid > Create panel
 of the Design workspace. Clicking the button picks a bin_config.json and
-delegates the build to _bin_builder.build_bin() (shared with the script).
+delegates the build to _bin_builder.build_bin().
 """
 
 import os

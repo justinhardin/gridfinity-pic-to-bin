@@ -1,4 +1,4 @@
-"""Shared bin-building logic used by both the Fusion script and add-in.
+"""Bin-building logic for the Fusion 360 add-in.
 
 Reads bin_config.json (from prepare_bin.py) and creates a parametric
 gridfinity bin with tool pocket cutouts in a Fusion 360 document.

@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pic-to-Bin — Phone photos to 3D-printed Gridfinity bins</title>
+  <meta name="description" content="Photograph tools on a printed template, get a parametric Gridfinity bin model ready to 3D-print.">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon-64.png">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="home">
+
+  <header class="home-header">
+    <a class="home-brand" href="/">Pic-to-Bin</a>
+    <a class="home-nav-link" href="/app">Open the app →</a>
+  </header>
+
+  <main class="home-main">
+
+    <!-- Hero -->
+    <section class="hero">
+      <h1>Phone photos → 3D-printed Gridfinity bin.</h1>
+      <p class="hero-sub">
+        Photograph your tools on a printed template. The app traces each
+        outline, packs them into the smallest Gridfinity bin that fits,
+        and hands you a parametric Fusion 360 model ready to slice.
+      </p>
+      <a class="primary button-link hero-cta" href="/app">Launch the app →</a>
+    </section>
+
+    <!-- Requirements -->
+    <section class="card">
+      <h2>You'll need</h2>
+      <ul class="requirements">
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2 3 7v10l9 5 9-5V7z"/>
+            <path d="M3 7l9 5 9-5"/>
+            <path d="M12 12v10"/>
+          </svg>
+          <div>
+            <strong>Autodesk Fusion 360</strong>
+            <p>Free for personal use.
+              <a href="https://www.autodesk.com/products/fusion/personal" target="_blank" rel="noopener">Download from Autodesk →</a>
+            </p>
+          </div>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="9" width="16" height="9" rx="1"/>
+            <path d="M7 9V4h10v5"/>
+            <path d="M8 14h8v6H8z"/>
+          </svg>
+          <div>
+            <strong>A 3D printer</strong>
+            <p>Any FDM printer that handles standard Gridfinity bins (PLA, PETG, or ABS).</p>
+          </div>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="3" width="13" height="18" rx="1"/>
+            <path d="M9 7h7M9 11h7M9 15h4"/>
+          </svg>
+          <div>
+            <strong>Paper + a regular printer</strong>
+            <p>Print the ArUco-marker template once on plain paper.</p>
+          </div>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="2" width="12" height="20" rx="2"/>
+            <path d="M11 18h2"/>
+            <circle cx="12" cy="7" r="2"/>
+          </svg>
+          <div>
+            <strong>A phone camera</strong>
+            <p>Any modern phone. Moderate angles are fine — perspective gets corrected automatically.</p>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+    <!-- Step 0: One-time setup (Fusion add-in + print template) -->
+    <section class="card fusion-install-card">
+      <h2>Step 0 · One-time setup</h2>
+      <p class="section-hint">
+        Two short things to do once. After this, every bin starts at Step 1.
+      </p>
+
+      <div class="setup-block">
+        <h3>① Install the Fusion 360 add-in</h3>
+        <p>
+          Download the add-in and drop one folder into your Fusion API
+          directory. <code>INSTALL.txt</code> inside the ZIP has the
+          exact paths for Windows and macOS — about 30 seconds.
+        </p>
+        <p>
+          <a class="primary button-link" href="/download/fusion-addin.zip" download>
+            ⬇ Download Fusion add-in (.zip)
+          </a>
+        </p>
+        <details class="install-summary">
+          <summary>Show install steps</summary>
+          <ol class="fusion-steps">
+            <li>
+              Extract <code>pic-to-bin-fusion.zip</code>. Inside you'll see
+              an <code>AddIns/pic_to_bin/</code> folder.
+            </li>
+            <li>
+              Open your Fusion 360 API directory:
+              <ul>
+                <li><strong>Windows:</strong> <code>%APPDATA%\Autodesk\Autodesk Fusion 360\API</code></li>
+                <li><strong>macOS:</strong> <code>~/Library/Application Support/Autodesk/Autodesk Fusion 360/API</code></li>
+              </ul>
+            </li>
+            <li>
+              Drag the ZIP's <code>AddIns/pic_to_bin</code> folder into
+              the API's <code>AddIns/</code> folder (so the path ends with
+              <code>…/AddIns/pic_to_bin/pic_to_bin.py</code>).
+            </li>
+            <li>
+              In Fusion 360, press <strong>Shift+S</strong>, switch to the
+              <strong>Add-Ins</strong> tab, select <em>pic_to_bin</em>, and
+              click <strong>Run</strong>. Tick <em>"Run on Startup"</em> so
+              the button shows up every session.
+            </li>
+            <li>
+              In a Design workspace, the new button appears under
+              <em>Solid → Create → Gridfinity Pic-to-Bin</em>.
+            </li>
+          </ol>
+        </details>
+      </div>
+
+      <div class="setup-block">
+        <h3>② Print the ArUco template</h3>
+        <p>
+          Print on plain paper at <strong>100 % scale</strong> (no
+          fit-to-page). One template is reusable — print once and
+          photograph as many tools as you like. Pick the paper size
+          you'll load; the green chroma-key variant helps SAM2 segment
+          light or reflective tools.
+        </p>
+        <div class="template-picker">
+          <label class="template-field">
+            <span>Paper size</span>
+            <select id="tpl-size">
+              <option value="letter">US Letter (8.5 × 11 in)</option>
+              <option value="legal">US Legal (8.5 × 14 in)</option>
+              <option value="a5">A5 (148 × 210 mm)</option>
+            </select>
+          </label>
+          <label class="template-field">
+            <span>Background</span>
+            <select id="tpl-bg">
+              <option value="white">White</option>
+              <option value="green">Chroma-key green (#00B140)</option>
+            </select>
+          </label>
+        </div>
+        <p>
+          <a id="tpl-download"
+             class="primary button-link"
+             href="/static/templates/template_letter_white.pdf"
+             download="pic_to_bin_template_letter_white.pdf">
+            ⬇ Download template (PDF)
+          </a>
+        </p>
+      </div>
+    </section>
+
+    <script>
+      // Wire the template-picker selects to the download link.
+      (() => {
+        const size = document.getElementById('tpl-size');
+        const bg = document.getElementById('tpl-bg');
+        const link = document.getElementById('tpl-download');
+        if (!size || !bg || !link) return;
+        const update = () => {
+          const s = size.value, b = bg.value;
+          link.href = `/static/templates/template_${s}_${b}.pdf`;
+          link.setAttribute(
+            'download', `pic_to_bin_template_${s}_${b}.pdf`);
+        };
+        size.addEventListener('change', update);
+        bg.addEventListener('change', update);
+      })();
+    </script>
+
+    <!-- How it works -->
+    <section class="card">
+      <h2>How it works</h2>
+      <p class="section-hint">A typical run takes 5–10 minutes end to end.</p>
+
+      <ol class="how-steps">
+
+        <li>
+          <div class="step-num">1</div>
+          <img class="step-photo" src="/static/photo_tips/screwdriver_green.jpg" alt="Phone photo of a screwdriver on the printed template">
+          <div class="step-text">
+            <h3>Photograph your tools</h3>
+            <p>Lay each tool on the template you printed in Step 0 and
+              snap a phone photo. One photo per tool. Overhead light, all
+              8 markers in frame when possible.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">2</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="6" y="22" width="52" height="20" rx="2"/>
+              <path d="M14 22v6M22 22v8M30 22v6M38 22v8M46 22v6M54 22v8"/>
+              <path d="M14 42v6M22 42v8M30 42v6M38 42v8M46 42v6M54 42v8"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Enter each tool's height</h3>
+            <p>Measure thickness with calipers or a ruler — that sets the
+              pocket depth. The bin auto-sizes to the tallest tool.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">3</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="28" cy="28" r="16"/>
+              <path d="M40 40l14 14"/>
+              <path d="M20 28c4-6 12-6 16 0"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Inspect the trace</h3>
+            <p>The app overlays its trace on each photo. Adjust trace
+              parameters or rerun a specific image if a detail looks off.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">4</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="8" y="8" width="48" height="48" rx="2"/>
+              <path d="M8 24h48M8 40h48M24 8v48M40 8v48" stroke-opacity="0.35"/>
+              <path d="M14 14c3 4 3 9 0 14s-3 12 0 18M30 14c4 6 4 12 0 18s-4 12 0 18M50 22c2 4 2 10 0 14"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Review the auto-packed layout</h3>
+            <p>Tools snap to the smallest Gridfinity bin that fits.
+              Print the 1:1-scale PDF fit-test on paper and check the
+              physical tools sit cleanly before committing to a 3D print.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">5</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 6h22l10 10v42H16z"/>
+              <path d="M38 6v10h10"/>
+              <path d="M22 32h20M22 40h20M22 48h12"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Download <code>bin_config.json</code></h3>
+            <p>The bin recipe. Polygons, dimensions, and Gridfinity sizing
+              the Fusion add-in reads in one click.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">6</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M32 8L8 20v24l24 12 24-12V20z"/>
+              <path d="M8 20l24 12 24-12"/>
+              <path d="M32 32v24"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Build the model in Fusion 360</h3>
+            <p>Click <em>Solid → Create → Gridfinity Pic-to-Bin</em>, pick the
+              JSON. Fusion builds the parametric body, stacking lip, tool
+              pockets, finger slots, and Gridfinity base — all in named
+              timeline groups you can edit afterward.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">7</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 12h20v20H22z"/>
+              <path d="M32 32v18M24 42l8 8 8-8"/>
+              <path d="M14 56h36"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>Export as STL (or mesh)</h3>
+            <p>Fusion's <em>File → 3D Print</em> writes an STL ready for
+              any slicer. STEP works too if you want to remix the geometry.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">8</div>
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="10" y="14" width="44" height="26" rx="2"/>
+              <rect x="20" y="40" width="24" height="14"/>
+              <path d="M14 22h6M14 28h6M14 34h6"/>
+              <path d="M44 22l4-4 4 4"/>
+            </svg>
+          </div>
+          <div class="step-text">
+            <h3>3D-print and drop in your tools</h3>
+            <p>Slice and print at your usual settings. ~2 mm of clearance
+              is baked into each pocket so tools drop in cleanly without
+              forcing.</p>
+          </div>
+        </li>
+
+      </ol>
+    </section>
+
+    <!-- Bottom CTA -->
+    <section class="cta-bottom">
+      <a class="primary button-link hero-cta" href="/app">Launch the app →</a>
+    </section>
+
+  </main>
+
+  <footer class="home-footer">
+    <p>
+      <a href="https://github.com/justinhardin/gridfinity-pic-to-bin" target="_blank" rel="noopener">Source on GitHub</a>
+    </p>
+  </footer>
+
+</body>
+</html>

@@ -17,12 +17,11 @@ entry points in these modules.
 | `validate_trace.py` | Trace-quality sanity checks. |
 | `layout_tools.py` | Polygon-pack tools into a Gridfinity bin; emits combined DXF and a 1:1 PDF/SVG fit-test. |
 | `prepare_bin.py` | Center the cutout, write the `bin_config.json` consumed by Fusion. |
-| `fusion_install.py` | `pic-to-bin-fusion install` — copies the add-in and script into Fusion's user dirs. |
+| `fusion_install.py` | `pic-to-bin-fusion install` — copies the add-in into Fusion's user AddIns folder. |
 
 Subpackages:
 
 - `web/` — FastAPI + Lit browser app (see `web/README.md`)
-- `pic_to_bin_script/` — Fusion 360 Script entry (see `pic_to_bin_script/README.md`)
 - `pic_to_bin_addin/` — Fusion 360 Add-In entry (see `pic_to_bin_addin/README.md`)
 
 Runtime output goes to `../generated/` (CLI) or `../web_jobs/<uuid>/`
