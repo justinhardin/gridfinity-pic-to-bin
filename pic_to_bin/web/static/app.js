@@ -31,6 +31,12 @@ const FORM_DEFAULTS = {
   display_smooth_sigma: 2.5,
 };
 
+// Client-side upload guards (must match server MAX_* constants).
+// 30 MiB per file lets any modern phone photo of the template through
+// while stopping obvious abuse before it wastes bandwidth or hits the 413.
+const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30 MiB
+const MAX_FILES = 8;
+
 // Which fields, when changed on a redo, force a re-trace (expensive).
 // Everything else is layout-only (cheap; cached DXFs reused).
 const TRACE_REQUIRED_FIELDS = new Set([
@@ -928,7 +934,7 @@ class PicForm extends LitElement {
           <input type="file" multiple accept=".png,.jpg,.jpeg,.heic,.heif"
                  @change=${this._onPick}>
           <p><strong>Drag photos here</strong> or click to choose.</p>
-          <p class="hint">JPG / PNG / HEIC. Each photo must contain the printed ArUco template.</p>
+          <p class="hint">JPG / PNG / HEIC up to 30 MiB each (any modern phone photo of the template is fine at full resolution).</p>
         </div>
         ${this._renderThumbs()}
       </div>
@@ -1218,10 +1224,37 @@ class PicForm extends LitElement {
   };
 
   async _addFiles(fileList) {
+    const currentCount = this.files.length;
+    const candidates = Array.from(fileList);
+
+    // Client-side guard — stops huge uploads before any network traffic
+    // and gives immediate friendly feedback for modern phone users.
+    const good = [];
+    for (const f of candidates) {
+      if (f.size > MAX_FILE_SIZE) {
+        const mb = (f.size / (1024 * 1024)).toFixed(1);
+        const maxMb = (MAX_FILE_SIZE / (1024 * 1024)).toFixed(0);
+        alert(
+          `${f.name} is ${mb} MiB.\n\n` +
+            `Maximum per photo is ${maxMb} MiB.\n` +
+            `Your phone's normal camera resolution is perfectly fine — ` +
+            `just avoid RAW / ProRAW / "original" modes.`
+        );
+        continue;
+      }
+      good.push(f);
+    }
+    if (currentCount + good.length > MAX_FILES) {
+      alert(`Maximum ${MAX_FILES} photos per job. Please remove some before adding more.`);
+      return;
+    }
+
+    if (good.length === 0) return;
+
     // Add files to state immediately with placeholder previews so the user
     // sees thumbnails right away. HEIC takes a couple of seconds to convert
     // via heic2any (libheif WASM), so we don't want to block the form.
-    const incoming = Array.from(fileList).map(file => ({
+    const incoming = good.map(file => ({
       file,
       toolHeight: null,
       dataUrl: "",

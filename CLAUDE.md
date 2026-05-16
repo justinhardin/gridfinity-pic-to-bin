@@ -20,19 +20,19 @@ pic-to-bin-web --port 8000       # http://localhost:8000
   info-modal field documentation, browser-back navigation between screens.
 - 1:1-scale fit-test PDF + SVG outputs alongside the screen-PNG preview so
   users can print and verify fit before 3D printing.
-- 2 mm uniform tolerance baseline + 1 mm axial-tolerance default
-  (PCA-stretched along the tool's principal axis to compensate for
-  SAM2 tip under-detection).
+- 2 mm uniform tolerance baseline + 'auto' axial-tolerance default
+  (2 mm floor + taper-proportional bonus, PCA-stretched along the
+  tool's principal axis to compensate for SAM2 tip under-detection).
 
 **Last session's open thread:** none — everything committed and tested
-(45/45 passing). Reasonable next-session starters:
-- More fit-test refinement if the 2 mm + 1 mm axial defaults need
-  further tuning per user's print results.
-- Stub OAuth / Printables.com / LLM-redo plumbing that the plan calls
-  out as future hooks.
-- UI: `pic-progress` substep rendering still shows the most recent
-  per-image event only — could be smarter about per-image lifecycle
-  (preprocess → trace done → ✓).
+(>100 passing). Security hardening complete for public hosting:
+- 30 MiB / 8 photo / 120 MiB upload limits + client-side guards
+- "check with LLM" feature is now opt-in only (`--enable-llm` / `PIC_TO_BIN_ENABLE_LLM`); disabled by default with clear warnings
+- Security headers (CSP, X-Frame-Options, etc.) + hardened error handler
+- Server-side param validation + defensive checks in JobManager
+- Comprehensive NGINX/Apache guidance + updated web/README.md
+
+The app is now safe to put behind a public NGINX/Apache reverse proxy on 127.0.0.1:8000. LLM costs and classic DoS vectors are neutralised while preserving the full tuned pipeline quality.
 
 ## Project Overview
 
@@ -305,7 +305,7 @@ Note: `cv2.aruco` is included in standard `opencv-python` (4.13+). No need for `
 - **Effective DPI**: Computed from the homography inverse — how many pixels per mm at the template center. Typically 100-250 for phone photos.
 - **Tolerance baseline = 2 mm**: The pipeline silently adds 2 mm of clearance to whatever the user passes via `--tolerance` (constant `pipeline.py:TOLERANCE_BASELINE_MM`). The CLI/form default is `0`, which produces a 2 mm physical clearance — calibrated for typical FDM tolerances. `--tolerance -2` recovers an exact-trace match; more negative produces an interference fit. The tolerance polygon is always Douglas-Peucker simplified at ε=0.3 mm.
 - **Mask erosion default = 0 mm**: Uniform mask erosion disproportionately shrinks tapered tool tips (a 0.3 mm erosion can lose meaningful coverage at a screwdriver tip while barely affecting a wide handle). Default is 0; users can re-enable when a photo has a clearly fat shadow halo via `--mask-erode 0.3`.
-- **Axial tolerance (default 1 mm)**: After the uniform offset, the tolerance polygon is stretched along the tool's PCA principal axis so each end gets `--axial-tolerance` mm of additional clearance (perpendicular extent unchanged). Compensates for SAM2's tendency to under-detect tapered tool tips. Implemented in `trace_export._axial_stretch_polygons` via SVD on the polygon point cloud + a linear-ramp scale in the rotated frame. Set to 0 for fully uniform tolerance.
+- **Axial tolerance (default 'auto')**: After the uniform offset, the tolerance polygon is stretched along the tool's PCA principal axis so each end gets `--axial-tolerance` mm of additional clearance (perpendicular extent unchanged). Compensates for SAM2's tendency to under-detect tool length — present even on rounded/square ends, larger on tapered tips. `'auto'` uses `2.0 + 0.014 × axial_length × taper` (taper from per-bin width analysis along the principal axis), so square-ended tools get the 2 mm floor (matching the perpendicular baseline) and sharply tapered tools get more. Implemented in `trace_export._axial_stretch_polygons` via SVD on the polygon point cloud + a linear-ramp scale in the rotated frame. Set to 0 for fully uniform tolerance.
 
 ## Relationship to gridfinity-scan-to-bin
 

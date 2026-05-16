@@ -161,11 +161,11 @@ def _auto_axial_tolerance_mm(
 ) -> float:
     """Compute an axial tolerance based on the tool's tip taper.
 
-    SAM2 under-detects sharp/tapered tips much more than square ends.
-    The signal we want isn't length per se — it's how narrow the tool
-    gets at its axial extremes relative to its body. A long ruler with
-    square ends (taper ≈ 0) only needs the floor tolerance; long
-    tapered shears (taper ≈ 0.85) need ~3 mm.
+    SAM2 under-detects tool length on every shape — even rounded or
+    square ends lose a few pixels at the axial extremes — and tapered
+    tips lose more. The 2 mm floor matches the perpendicular baseline
+    so length and width get the same minimum clearance; tapered shapes
+    add proportional extra on top.
 
     Algorithm:
       1. PCA principal axis from the polygon point cloud (existing helper).
@@ -175,20 +175,20 @@ def _auto_axial_tolerance_mm(
       4. tip_width  = mean of width in the outer 10% of bins (each end).
          body_width = median of width across the middle 80% of bins.
       5. taper = clamp(1 − tip_width / body_width, 0, 1).
-      6. axial_tol = 0.5 + 0.012 × axial_length × taper.
+      6. axial_tol = 2.0 + 0.014 × axial_length × taper.
 
     Returns a non-negative float. On a degenerate polygon (no points,
-    zero extent) returns 0.5 mm — the "always include a little tip
-    clearance" floor that matches typical SAM2 tip slop.
+    zero extent) returns the 2.0 mm floor.
     """
+    floor = 2.0
     if not polygons:
-        return 0.5
+        return floor
 
     # Pick the largest polygon by point count as the outer outline —
     # smaller polygons (interior holes) don't shape the tip taper.
     outer = max(polygons, key=len)
     if len(outer) < 8:
-        return 0.5
+        return floor
 
     angle = _principal_axis_angle([outer])
     cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
@@ -200,7 +200,7 @@ def _auto_axial_tolerance_mm(
     axial_min, axial_max = float(axial.min()), float(axial.max())
     axial_length = axial_max - axial_min
     if axial_length < 1e-3:
-        return 0.5
+        return floor
 
     # Bin along the axis. 30 bins is enough resolution for a typical
     # hand tool (axial_length ~ 50–300 mm) without making each bin so
@@ -216,7 +216,7 @@ def _auto_axial_tolerance_mm(
         widths[i] = float(perp[mask_in].max() - perp[mask_in].min())
     valid = ~np.isnan(widths)
     if valid.sum() < 5:
-        return 0.5
+        return floor
 
     # Tip widths: take the median of the outermost 2 bins on EACH end,
     # then use the minimum of the two ends. Asymmetric tools (e.g. a
@@ -236,14 +236,14 @@ def _auto_axial_tolerance_mm(
     body_widths = widths[n_tip:-n_tip]
     body_widths = body_widths[~np.isnan(body_widths)]
     if left_end.size == 0 or right_end.size == 0 or body_widths.size == 0:
-        return 0.5
+        return floor
     tip_w = float(min(np.median(left_end), np.median(right_end)))
     body_w = float(np.median(body_widths))
     if body_w < 1e-3:
-        return 0.5
+        return floor
 
     taper = max(0.0, min(1.0, 1.0 - tip_w / body_w))
-    axial_tol = 0.5 + 0.014 * axial_length * taper
+    axial_tol = floor + 0.014 * axial_length * taper
 
     print(f"  Auto axial tolerance: length={axial_length:.1f} mm, "
           f"tip_w={tip_w:.1f} mm (sharper end), body_w={body_w:.1f} mm, "

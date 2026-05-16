@@ -1295,56 +1295,6 @@ header.home-header {
   margin-bottom: 0.4rem;
 }
 
-/* Step 0 sub-blocks (Fusion install + template print, stacked) */
-
-.setup-block {
-  border-top: 1px solid var(--border);
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-}
-
-.setup-block:first-of-type {
-  border-top: 0;
-  margin-top: 0.5rem;
-  padding-top: 0;
-}
-
-.setup-block h3 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.template-picker {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.75rem;
-  margin: 0.75rem 0;
-}
-
-.template-field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
-.template-field select {
-  padding: 0.45rem 0.65rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  font-size: 0.95rem;
-  background: var(--card-bg);
-  color: var(--fg);
-}
-
-.template-field select:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
 /* How-it-works steps */
 
 .how-steps {

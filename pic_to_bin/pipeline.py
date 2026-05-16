@@ -465,9 +465,9 @@ examples:
              "by this amount, leaving the perpendicular extent unchanged. "
              "Compensates for SAM2 mask under-detection at tapered tool "
              "tips. 'auto' picks a value from the polygon: a square-ended "
-             "tool (e.g. ruler) gets ~0.5 mm; a sharply tapered tool "
-             "(e.g. shears) gets up to ~3 mm — formula is "
-             "0.5 + 0.014 × axial_length × taper. Pass an explicit number "
+             "tool (e.g. ruler) gets the 2 mm floor; a sharply tapered tool "
+             "(e.g. shears) gets up to ~5 mm — formula is "
+             "2.0 + 0.014 × axial_length × taper. Pass an explicit number "
              "(e.g. 1.5) to override; pass 0 for fully uniform tolerance.")
     parser.add_argument(
         "--phone-height", type=float, default=None,

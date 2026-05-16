@@ -81,112 +81,52 @@
       </ul>
     </section>
 
-    <!-- Step 0: One-time setup (Fusion add-in + print template) -->
+    <!-- Step 0: Fusion add-in install -->
     <section class="card fusion-install-card">
-      <h2>Step 0 · One-time setup</h2>
-      <p class="section-hint">
-        Two short things to do once. After this, every bin starts at Step 1.
+      <h2>Step 0 · Install the Fusion 360 add-in <span class="card-h2-sub">(one-time)</span></h2>
+      <p>
+        Download the add-in, extract the ZIP, and copy two folders into
+        your Fusion API directory. <code>INSTALL.txt</code> inside has
+        the exact paths for Windows and macOS — under a minute of setup.
       </p>
-
-      <div class="setup-block">
-        <h3>① Install the Fusion 360 add-in</h3>
-        <p>
-          Download the add-in and drop one folder into your Fusion API
-          directory. <code>INSTALL.txt</code> inside the ZIP has the
-          exact paths for Windows and macOS — about 30 seconds.
-        </p>
-        <p>
-          <a class="primary button-link" href="/download/fusion-addin.zip" download>
-            ⬇ Download Fusion add-in (.zip)
-          </a>
-        </p>
-        <details class="install-summary">
-          <summary>Show install steps</summary>
-          <ol class="fusion-steps">
-            <li>
-              Extract <code>pic-to-bin-fusion.zip</code>. Inside you'll see
-              an <code>AddIns/pic_to_bin/</code> folder.
-            </li>
-            <li>
-              Open your Fusion 360 API directory:
-              <ul>
-                <li><strong>Windows:</strong> <code>%APPDATA%\Autodesk\Autodesk Fusion 360\API</code></li>
-                <li><strong>macOS:</strong> <code>~/Library/Application Support/Autodesk/Autodesk Fusion 360/API</code></li>
-              </ul>
-            </li>
-            <li>
-              Drag the ZIP's <code>AddIns/pic_to_bin</code> folder into
-              the API's <code>AddIns/</code> folder (so the path ends with
-              <code>…/AddIns/pic_to_bin/pic_to_bin.py</code>).
-            </li>
-            <li>
-              In Fusion 360, press <strong>Shift+S</strong>, switch to the
-              <strong>Add-Ins</strong> tab, select <em>pic_to_bin</em>, and
-              click <strong>Run</strong>. Tick <em>"Run on Startup"</em> so
-              the button shows up every session.
-            </li>
-            <li>
-              In a Design workspace, the new button appears under
-              <em>Solid → Create → Gridfinity Pic-to-Bin</em>.
-            </li>
-          </ol>
-        </details>
-      </div>
-
-      <div class="setup-block">
-        <h3>② Print the ArUco template</h3>
-        <p>
-          Print on plain paper at <strong>100 % scale</strong> (no
-          fit-to-page). One template is reusable — print once and
-          photograph as many tools as you like. Pick the paper size
-          you'll load; the green chroma-key variant helps SAM2 segment
-          light or reflective tools.
-        </p>
-        <div class="template-picker">
-          <label class="template-field">
-            <span>Paper size</span>
-            <select id="tpl-size">
-              <option value="letter">US Letter (8.5 × 11 in)</option>
-              <option value="legal">US Legal (8.5 × 14 in)</option>
-              <option value="a5">A5 (148 × 210 mm)</option>
-            </select>
-          </label>
-          <label class="template-field">
-            <span>Background</span>
-            <select id="tpl-bg">
-              <option value="white">White</option>
-              <option value="green">Chroma-key green (#00B140)</option>
-            </select>
-          </label>
-        </div>
-        <p>
-          <a id="tpl-download"
-             class="primary button-link"
-             href="/static/templates/template_letter_white.pdf"
-             download="pic_to_bin_template_letter_white.pdf">
-            ⬇ Download template (PDF)
-          </a>
-        </p>
-      </div>
+      <p>
+        <a class="primary button-link" href="/download/fusion-addin.zip" download>
+          ⬇ Download Fusion add-in (.zip)
+        </a>
+      </p>
+      <details class="install-summary">
+        <summary>Show install steps</summary>
+        <ol class="fusion-steps">
+          <li>
+            Extract <code>pic-to-bin-fusion.zip</code>. You'll see two
+            folders inside: <code>Scripts/</code> and <code>AddIns/</code>.
+          </li>
+          <li>
+            Open your Fusion 360 API directory:
+            <ul>
+              <li><strong>Windows:</strong> <code>%APPDATA%\Autodesk\Autodesk Fusion 360\API</code></li>
+              <li><strong>macOS:</strong> <code>~/Library/Application Support/Autodesk/Autodesk Fusion 360/API</code></li>
+            </ul>
+          </li>
+          <li>
+            Drag the <code>pic_to_bin</code> folder from the ZIP's
+            <code>Scripts/</code> into the API's <code>Scripts/</code> folder,
+            and the <code>pic_to_bin</code> folder from <code>AddIns/</code>
+            into the API's <code>AddIns/</code>.
+          </li>
+          <li>
+            In Fusion 360, press <strong>Shift+S</strong>, switch to the
+            <strong>Add-Ins</strong> tab, select <em>pic_to_bin</em>, and
+            click <strong>Run</strong>. Check <em>"Run on Startup"</em> so
+            the button shows up every session.
+          </li>
+          <li>
+            In a Design workspace, the new button appears under
+            <em>Solid → Create → Gridfinity Pic-to-Bin</em>.
+          </li>
+        </ol>
+      </details>
     </section>
-
-    <script>
-      // Wire the template-picker selects to the download link.
-      (() => {
-        const size = document.getElementById('tpl-size');
-        const bg = document.getElementById('tpl-bg');
-        const link = document.getElementById('tpl-download');
-        if (!size || !bg || !link) return;
-        const update = () => {
-          const s = size.value, b = bg.value;
-          link.href = `/static/templates/template_${s}_${b}.pdf`;
-          link.setAttribute(
-            'download', `pic_to_bin_template_${s}_${b}.pdf`);
-        };
-        size.addEventListener('change', update);
-        bg.addEventListener('change', update);
-      })();
-    </script>
 
     <!-- How it works -->
     <section class="card">
@@ -197,17 +137,36 @@
 
         <li>
           <div class="step-num">1</div>
-          <img class="step-photo" src="/static/photo_tips/screwdriver_green.jpg" alt="Phone photo of a screwdriver on the printed template">
+          <div class="step-icon-art" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="12" y="6" width="40" height="52" rx="2"/>
+              <rect x="16" y="10" width="6" height="6"/>
+              <rect x="42" y="10" width="6" height="6"/>
+              <rect x="16" y="48" width="6" height="6"/>
+              <rect x="42" y="48" width="6" height="6"/>
+              <path d="M24 32h16M32 24v16" stroke-dasharray="2 3"/>
+            </svg>
+          </div>
           <div class="step-text">
-            <h3>Photograph your tools</h3>
-            <p>Lay each tool on the template you printed in Step 0 and
-              snap a phone photo. One photo per tool. Overhead light, all
-              8 markers in frame when possible.</p>
+            <h3>Print the template</h3>
+            <p>Plain paper, <strong>100 % scale</strong> (no fit-to-page). The
+              ArUco markers calibrate scale and correct camera perspective.</p>
           </div>
         </li>
 
         <li>
           <div class="step-num">2</div>
+          <img class="step-photo" src="/static/photo_tips/screwdriver_green.jpg" alt="Phone photo of a screwdriver on the printed template">
+          <div class="step-text">
+            <h3>Photograph your tools</h3>
+            <p>Lay each tool on the template and snap a phone photo.
+              One photo per tool. Overhead light, all 8 markers in frame
+              when possible.</p>
+          </div>
+        </li>
+
+        <li>
+          <div class="step-num">3</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="6" y="22" width="52" height="20" rx="2"/>
@@ -223,7 +182,7 @@
         </li>
 
         <li>
-          <div class="step-num">3</div>
+          <div class="step-num">4</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="28" cy="28" r="16"/>
@@ -239,7 +198,7 @@
         </li>
 
         <li>
-          <div class="step-num">4</div>
+          <div class="step-num">5</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="8" y="8" width="48" height="48" rx="2"/>
@@ -256,7 +215,7 @@
         </li>
 
         <li>
-          <div class="step-num">5</div>
+          <div class="step-num">6</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M16 6h22l10 10v42H16z"/>
@@ -272,7 +231,7 @@
         </li>
 
         <li>
-          <div class="step-num">6</div>
+          <div class="step-num">7</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M32 8L8 20v24l24 12 24-12V20z"/>
@@ -290,7 +249,7 @@
         </li>
 
         <li>
-          <div class="step-num">7</div>
+          <div class="step-num">8</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 12h20v20H22z"/>
@@ -306,7 +265,7 @@
         </li>
 
         <li>
-          <div class="step-num">8</div>
+          <div class="step-num">9</div>
           <div class="step-icon-art" aria-hidden="true">
             <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="10" y="14" width="44" height="26" rx="2"/>

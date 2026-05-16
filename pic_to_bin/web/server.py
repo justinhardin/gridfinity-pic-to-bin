@@ -6,13 +6,13 @@ GET  /                          → static home.html (marketing / instructions)
 GET  /app                       → static index.html (the Lit app)
 GET  /download/fusion-addin.zip → zipped Fusion 360 script+add-in for manual install
 GET  /static/{path}             → static assets (JS, CSS, vendored Lit)
-POST /jobs                      → create job (multipart: images + JSON params)
+POST /jobs                      → create job (multipart: images + JSON params; 30 MiB/photo, 8 photos, 120 MiB total)
 GET  /jobs/{id}                 → job summary (status, artifact URLs)
 GET  /jobs/{id}/events          → SSE stream of progress events
 POST /jobs/{id}/proceed         → run Phase B (bin_config.json)
 POST /jobs/{id}/redo            → re-run with adjusted params
 GET  /jobs/{id}/artifacts/{fn}  → download layout_preview.png / combined_layout.dxf / bin_config.json
-POST /preview                   → convert a HEIC/HEIF upload to a small JPEG thumbnail
+POST /preview                   → convert a HEIC/HEIF upload to a small JPEG thumbnail (same 30 MiB limit)
 """
 
 from __future__ import annotations
@@ -32,7 +32,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from pic_to_bin.web.jobs import JobManager, JobStatus, download_filename
+from pic_to_bin.web.jobs import (
+    JobManager,
+    JobStatus,
+    download_filename,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_JOB,
+    MAX_TOTAL_UPLOAD_BYTES,
+)
 
 logger = logging.getLogger("pic_to_bin.web")
 
@@ -47,15 +54,76 @@ ARTIFACT_WHITELIST = {
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif"}
 
 
+# Sane ranges for numeric pipeline parameters (used by _validate_params).
+# These are intentionally wider than the "typical" UI hints so power users
+# are not blocked, but still prevent 9999-unit bins or 999 mm tolerances
+# that would OOM or produce useless output.
+_PARAM_RANGES: dict[str, tuple[float, float]] = {
+    "tolerance": (-5.0, 5.0),
+    "axial_tolerance": (0.0, 10.0),
+    "phone_height": (50.0, 2000.0),
+    "gap": (0.0, 20.0),
+    "bin_margin": (0.0, 20.0),
+    "mask_erode": (0.0, 2.0),
+    "display_smooth_sigma": (0.0, 10.0),
+    "straighten_threshold": (0.0, 90.0),
+    "max_refine_iterations": (0, 20),
+    "max_concavity_depth": (0.0, 20.0),
+    "max_units": (1, 12),
+    "min_units_x": (1, 12),
+    "min_units_y": (1, 12),
+    "min_units_z": (1, 12),
+    "height_units": (1, 12),
+}
+
+
+def _validate_params(p: dict) -> None:
+    """Raise HTTPException(400) on obviously bad parameter values."""
+    # paper_size
+    if "paper_size" in p:
+        ps = str(p["paper_size"]).lower()
+        if ps not in {"a4", "a5", "letter", "legal"}:
+            raise HTTPException(400, f"invalid paper_size: {ps}")
+
+    # tool_heights: accept list[float] or dict[str,int]=height
+    th = p.get("tool_heights")
+    if th is not None:
+        heights: list[float] = []
+        if isinstance(th, (list, tuple)):
+            heights = [float(x) for x in th]
+        elif isinstance(th, dict):
+            heights = [float(v) for v in th.values()]
+        for h in heights:
+            if not (1.0 <= h <= 200.0):
+                raise HTTPException(400, f"tool_height {h} mm out of range [1,200]")
+
+    # numeric ranges
+    for key, (lo, hi) in _PARAM_RANGES.items():
+        if key in p and p[key] is not None:
+            try:
+                val = float(p[key])
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{key} must be a number")
+            if not (lo <= val <= hi):
+                raise HTTPException(400, f"{key}={val} out of range [{lo},{hi}]")
+
+    # sam_corrective_points is a dict of lists; basic shape check only
+    scp = p.get("sam_corrective_points")
+    if scp is not None and not isinstance(scp, dict):
+        raise HTTPException(400, "sam_corrective_points must be an object")
+
+
 def create_app(
     jobs_root: Path,
     ttl_hours: float = 24.0,
     anthropic_api_key: Optional[str] = None,
+    enable_llm: bool = False,
 ) -> FastAPI:
     job_manager = JobManager(
         jobs_root=jobs_root,
         ttl_hours=ttl_hours,
         anthropic_api_key=anthropic_api_key,
+        enable_llm=enable_llm,
     )
 
     @asynccontextmanager
@@ -83,6 +151,43 @@ def create_app(
 
     app = FastAPI(title="pic-to-bin", lifespan=lifespan)
     app.state.job_manager = job_manager
+
+    # --- Security headers (defence in depth; NGINX/Apache should also set them) ---
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        # Clickjacking / MIME / referrer / permissions
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        )
+        # CSP tuned for Lit + importmap + SSE + data: previews.
+        # When you run `python -m pic_to_bin.web.vendor_lit` the only external
+        # script is gone; you can then drop 'unsafe-inline' for scripts if you
+        # also externalise the importmap into a tiny static file.
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' blob:; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss:; "
+            "font-src 'self' data:; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self';"
+        )
+        response.headers.setdefault("Content-Security-Policy", csp)
+        # HSTS is best set by the terminating TLS proxy (Apache/NGINX) with
+        # a long max-age + preload. We set a short one here only as a hint.
+        if request.url.scheme == "https":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=86400; includeSubDomains",
+            )
+        return response
 
     # ---- Static UI ---------------------------------------------------------
 
@@ -181,7 +286,18 @@ def create_app(
         if tool_heights in (None, "", {}, []):
             raise HTTPException(400, "tool_heights is required")
 
+        # Basic server-side range / type validation (authoritative even if
+        # the frontend is bypassed). Rejects obviously malicious or typo'd
+        # values before they reach the heavy pipeline or get persisted.
+        _validate_params(params_dict)
+
+        if len(images) > MAX_IMAGES_PER_JOB:
+            raise HTTPException(
+                413, f"too many images: {len(images)} (max {MAX_IMAGES_PER_JOB})"
+            )
+
         files: list[tuple[str, bytes]] = []
+        total_bytes = 0
         for upload in images:
             ext = Path(upload.filename or "").suffix.lower()
             if ext not in ALLOWED_IMAGE_EXTS:
@@ -193,9 +309,29 @@ def create_app(
             data = await upload.read()
             if not data:
                 raise HTTPException(400, f"{upload.filename} is empty")
+            if len(data) > MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    413,
+                    f"{upload.filename} is {len(data) // (1024*1024)} MiB "
+                    f"(max {MAX_IMAGE_BYTES // (1024*1024)} MiB). "
+                    "Modern phone photos at default resolution are fine; "
+                    "avoid RAW or ProRAW modes.",
+                )
+            total_bytes += len(data)
+            if total_bytes > MAX_TOTAL_UPLOAD_BYTES:
+                raise HTTPException(
+                    413,
+                    f"total upload exceeds {MAX_TOTAL_UPLOAD_BYTES // (1024*1024)} MiB limit",
+                )
             files.append((upload.filename or f"image{ext}", data))
 
-        job = job_manager.create_job(params_dict, files)
+        job = job_manager.create_job(
+            params_dict,
+            files,
+            max_image_bytes=MAX_IMAGE_BYTES,
+            max_images=MAX_IMAGES_PER_JOB,
+            max_total_bytes=MAX_TOTAL_UPLOAD_BYTES,
+        )
         job_manager.submit_phase_a(job)
         return {"job_id": job.id, "status": job.status.value}
 
@@ -284,6 +420,7 @@ def create_app(
         layout_only = bool(payload.get("layout_only", True))
         if not isinstance(new_params, dict):
             raise HTTPException(400, "params must be a JSON object")
+        _validate_params(new_params)
         # Corrective SAM2 clicks invalidate any cached trace — they only
         # take effect on a fresh segmentation. Override the flag here so a
         # client can't accidentally request layout_only=True alongside
@@ -533,6 +670,12 @@ def create_app(
         data = await image.read()
         if not data:
             raise HTTPException(400, "empty file")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                413,
+                f"HEIC preview file is {len(data) // (1024*1024)} MiB "
+                f"(max {MAX_IMAGE_BYTES // (1024*1024)} MiB)",
+            )
         # Lazy import — avoids loading PIL on the cold start path; the
         # pipeline's segment_tool already pulls these in for HEIC inputs.
         from io import BytesIO
@@ -549,9 +692,14 @@ def create_app(
         return Response(content=out.getvalue(), media_type="image/jpeg")
 
     @app.exception_handler(Exception)
-    async def unhandled(_request: Request, exc: Exception):
-        logger.exception("Unhandled error: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+    async def unhandled(request: Request, exc: Exception):
+        logger.exception("Unhandled error on %s: %s", request.url.path, exc)
+        # Never leak Python tracebacks or local paths to the public.
+        # Support staff can correlate via the timestamp + job UUID in logs.
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error. Please try again later."},
+        )
 
     return app
 
@@ -561,19 +709,21 @@ def create_app(
 # ---------------------------------------------------------------------------
 
 _PACKAGE_ROOT = Path(__file__).parent.parent  # …/pic_to_bin
+_FUSION_SCRIPT_DIR = _PACKAGE_ROOT / "pic_to_bin_script"
 _FUSION_ADDIN_DIR = _PACKAGE_ROOT / "pic_to_bin_addin"
 
 _FUSION_INSTALL_TXT = """\
 Pic-to-Bin — Fusion 360 add-in install
 =======================================
 
-This ZIP contains the Pic-to-Bin Fusion 360 add-in. After a ~30-second
-one-time install you can build a Gridfinity bin from the web app's
-bin_config.json in a single click.
+This ZIP contains the script + add-in form of the Pic-to-Bin Fusion 360
+plugin. After the one-time install you can build a Gridfinity bin from
+the web app's bin_config.json in a single click.
 
 Inside the ZIP
 --------------
-  AddIns/pic_to_bin/    ← drop into <Fusion API>/AddIns/
+  Scripts/pic_to_bin/   ← put inside <Fusion API>/Scripts/
+  AddIns/pic_to_bin/    ← put inside <Fusion API>/AddIns/
 
 Where is the Fusion API directory?
 -----------------------------------
@@ -583,15 +733,17 @@ Where is the Fusion API directory?
 
 Install (one-time)
 ------------------
-  1. Open the Fusion API folder above. You should see an AddIns/ folder
-     inside it (Fusion creates it on first run; if it doesn't exist,
-     create it).
-  2. Copy this ZIP's AddIns/pic_to_bin folder into <API>/AddIns/
+  1. Open the Fusion API folder above. You should see Scripts/ and
+     AddIns/ folders inside it (Fusion creates them on first run; if
+     they don't exist, create them).
+  2. Copy this ZIP's Scripts/pic_to_bin folder into <API>/Scripts/
+     (so the path ends with .../Scripts/pic_to_bin/pic_to_bin.py).
+  3. Copy this ZIP's AddIns/pic_to_bin folder into <API>/AddIns/
      (so the path ends with .../AddIns/pic_to_bin/pic_to_bin.py).
-  3. Launch Fusion 360. Press Shift+S → Add-Ins tab → select
+  4. Launch Fusion 360. Press Shift+S → Add-Ins tab → select
      'pic_to_bin' → click Run. Tick "Run on Startup" so the button
      shows up every session.
-  4. In a Design workspace, the new "Gridfinity Pic-to-Bin" button
+  5. In a Design workspace, the new "Gridfinity Pic-to-Bin" button
      appears under Solid → Create.
 
 Use it
@@ -607,24 +759,27 @@ Use it
 Upgrades
 --------
   This ZIP always reflects the currently-deployed server. To upgrade,
-  re-download from the web app's Step 0 link and overwrite the
-  AddIns/pic_to_bin folder.
+  re-download from the web app's Step 0 link and overwrite the two
+  pic_to_bin folders.
 
 Source: https://github.com/justinhardin/gridfinity-pic-to-bin
 """
 
 
 def _build_fusion_addin_zip() -> bytes:
-    """Bundle pic_to_bin_addin into a self-installable ZIP.
+    """Bundle pic_to_bin_script + pic_to_bin_addin into a self-installable ZIP.
 
     Matches the layout that ``fusion_install.py`` would write into the
     Fusion API folder, but boxed up for users who don't have the Python
-    package installed locally.
+    package installed locally. The shared ``_bin_builder.py`` is copied
+    into both subfolders so each one is self-contained — same shape
+    ``fusion_install.install()`` produces.
     """
-    if not _FUSION_ADDIN_DIR.is_dir():
+    if not _FUSION_SCRIPT_DIR.is_dir() or not _FUSION_ADDIN_DIR.is_dir():
         # Should only happen in odd dev installs; surfacing as 500 is fine.
         raise RuntimeError(
-            f"Fusion add-in dir not found at {_FUSION_ADDIN_DIR}"
+            f"Fusion bundle dirs not found at {_FUSION_SCRIPT_DIR} / "
+            f"{_FUSION_ADDIN_DIR}"
         )
 
     buf = io.BytesIO()
@@ -641,7 +796,16 @@ def _build_fusion_addin_zip() -> bytes:
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("INSTALL.txt", _FUSION_INSTALL_TXT)
+        add_tree(_FUSION_SCRIPT_DIR, "Scripts/pic_to_bin")
+        # The add-in needs its own copy of _bin_builder.py (mirrors what
+        # fusion_install.py does on local installs).
         add_tree(_FUSION_ADDIN_DIR, "AddIns/pic_to_bin")
+        builder = _FUSION_SCRIPT_DIR / "_bin_builder.py"
+        if builder.exists():
+            zf.writestr(
+                "AddIns/pic_to_bin/_bin_builder.py",
+                builder.read_bytes(),
+            )
 
     return buf.getvalue()
 
@@ -692,20 +856,36 @@ def cli() -> None:
                         help="Enable hot reload (development only)")
     parser.add_argument("--log-level", default="info",
                         help="uvicorn log level (default: info)")
+    parser.add_argument(
+        "--enable-llm",
+        action="store_true",
+        default=os.environ.get("PIC_TO_BIN_ENABLE_LLM", "").lower() in ("1", "true", "yes"),
+        help="Enable the Anthropic-powered 'check with LLM' feature "
+             "(costs real money per call; default OFF for public sites). "
+             "Only honoured when ANTHROPIC_API_KEY is also set.",
+    )
     args = parser.parse_args()
 
     jobs_root = Path(args.jobs_dir).resolve()
     jobs_root.mkdir(parents=True, exist_ok=True)
     logger.info("Jobs directory: %s", jobs_root)
 
+    # LLM is *opt-in only* for public deployments. Never enable on a
+    # server reachable from the internet unless you are willing to pay
+    # per-transaction Anthropic bills and accept the extra outbound
+    # dependency.
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY") or None
-    if anthropic_api_key:
-        logger.info("LLM fit-check enabled (ANTHROPIC_API_KEY present)")
-    else:
-        logger.info(
-            "LLM fit-check disabled (set ANTHROPIC_API_KEY in env or .env "
-            "to enable)"
+    enable_llm = bool(args.enable_llm)
+    if enable_llm and anthropic_api_key:
+        logger.info("LLM fit-check ENABLED (ANTHROPIC_API_KEY present + --enable-llm)")
+    elif anthropic_api_key and not enable_llm:
+        logger.warning(
+            "ANTHROPIC_API_KEY is set but --enable-llm was not passed "
+            "(or PIC_TO_BIN_ENABLE_LLM != 1). LLM features are DISABLED. "
+            "This is the correct default for any public-facing instance."
         )
+    else:
+        logger.info("LLM fit-check disabled (no key or --enable-llm not used)")
 
     # The factory closure captures jobs_root so the app instance is rebuilt
     # cleanly on reload.
@@ -714,6 +894,7 @@ def cli() -> None:
             jobs_root,
             ttl_hours=args.job_ttl_hours,
             anthropic_api_key=anthropic_api_key,
+            enable_llm=enable_llm,
         )
 
     uvicorn.run(

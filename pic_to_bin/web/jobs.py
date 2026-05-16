@@ -44,6 +44,13 @@ class JobStatus(str, Enum):
 # returned without completing response" for every active connection on Ctrl-C.
 _SHUTDOWN_SENTINEL = object()
 
+# Security limits (also imported by server.py for the HTTP layer).
+# Chosen to allow any modern high-resolution phone photo of the ArUco
+# template while blocking obvious abuse (100 MB RAW files, 20-photo jobs).
+MAX_IMAGE_BYTES: int = 30 * 1024 * 1024
+MAX_IMAGES_PER_JOB: int = 8
+MAX_TOTAL_UPLOAD_BYTES: int = 120 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Per-job stdout/stderr capture
@@ -247,6 +254,7 @@ class JobManager:
         max_workers: int = 4,
         ttl_hours: float = 24.0,
         anthropic_api_key: Optional[str] = None,
+        enable_llm: bool = False,
     ):
         self.jobs_root = Path(jobs_root)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
@@ -258,7 +266,11 @@ class JobManager:
         self._gpu_sem = threading.Semaphore(gpu_concurrency)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.ttl_hours = ttl_hours
-        self.anthropic_api_key = anthropic_api_key
+        # Only honour the key when explicitly enabled (public sites must
+        # leave this False to avoid per-call Anthropic costs and outbound
+        # network calls from the server).
+        self.enable_llm = bool(enable_llm)
+        self.anthropic_api_key = anthropic_api_key if self.enable_llm else None
         # Wrap sys.stdout/stderr so worker-thread prints during a pipeline
         # run land in <job_dir>/job.log instead of the server console.
         # No-op for non-worker threads (uvicorn handlers, main).
@@ -273,7 +285,8 @@ class JobManager:
 
     @property
     def llm_available(self) -> bool:
-        return bool(self.anthropic_api_key)
+        """True only when both the key is present *and* enable_llm was True."""
+        return bool(self.anthropic_api_key) and self.enable_llm
 
     # -- loop binding --------------------------------------------------------
 
@@ -284,12 +297,34 @@ class JobManager:
 
     # -- job lifecycle -------------------------------------------------------
 
-    def create_job(self, params: dict, input_files: list[tuple[str, bytes]]) -> JobState:
+    def create_job(
+        self,
+        params: dict,
+        input_files: list[tuple[str, bytes]],
+        *,
+        # Limits are passed explicitly so tests and library callers can
+        # override; defaults match the public-web constants.
+        max_image_bytes: int = MAX_IMAGE_BYTES,
+        max_images: int = MAX_IMAGES_PER_JOB,
+        max_total_bytes: int = MAX_TOTAL_UPLOAD_BYTES,
+    ) -> JobState:
         """Allocate a job UUID, materialize uploaded files to disk, return state.
 
         ``input_files`` is a list of ``(filename, file_bytes)``. Names are
         sanitized (basename only) to prevent path traversal.
+
+        Size/count limits are enforced here (defensive) and also at the
+        FastAPI boundary so that even direct library use cannot DoS the host.
         """
+        if len(input_files) > max_images:
+            raise ValueError(f"too many images: {len(input_files)} (max {max_images})")
+        total = sum(len(d) for _, d in input_files)
+        if total > max_total_bytes:
+            raise ValueError(f"total upload {total} bytes exceeds limit")
+        for name, data in input_files:
+            if len(data) > max_image_bytes:
+                raise ValueError(f"{name} exceeds per-image limit ({max_image_bytes} bytes)")
+
         job_id = uuid.uuid4().hex
         job_dir = self.jobs_root / job_id
         inputs_dir = job_dir / "inputs"

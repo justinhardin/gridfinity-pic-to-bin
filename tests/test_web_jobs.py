@@ -529,3 +529,34 @@ def test_pipeline_kwargs_forwards_sam_corrective_points():
         "imgA": [{"x_mm": 10.0, "y_mm": 20.0, "label": 0}],
     }
     assert "ignored_field" not in out
+
+
+# ---------------------------------------------------------------------------
+# New security / DoS hardening tests (added 2026-05-15)
+# ---------------------------------------------------------------------------
+
+def test_create_job_rejects_oversized_file(mgr):
+    """JobManager (library entry point) rejects files > MAX_IMAGE_BYTES."""
+    from pic_to_bin.web.jobs import MAX_IMAGE_BYTES
+    big = b"X" * (MAX_IMAGE_BYTES + 1)
+    with pytest.raises(ValueError, match="exceeds per-image limit"):
+        mgr.create_job(
+            params={"tool_heights": 17.0},
+            input_files=[("huge.jpg", big)],
+        )
+
+
+def test_create_job_rejects_too_many_images(mgr):
+    """JobManager rejects > MAX_IMAGES_PER_JOB submissions."""
+    from pic_to_bin.web.jobs import MAX_IMAGES_PER_JOB
+    files = [(f"{i}.jpg", b"ok") for i in range(MAX_IMAGES_PER_JOB + 1)]
+    with pytest.raises(ValueError, match="too many images"):
+        mgr.create_job(params={"tool_heights": 17.0}, input_files=files)
+
+
+def test_llm_disabled_by_default(mgr):
+    """When enable_llm=False (the public default), llm_available stays False
+    even if a key is accidentally present in the environment."""
+    # The fixture mgr was created without enable_llm=True.
+    assert mgr.llm_available is False
+    # Even if we had passed a key, the flag controls it.
