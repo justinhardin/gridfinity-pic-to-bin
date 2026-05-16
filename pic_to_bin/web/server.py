@@ -85,29 +85,41 @@ def _validate_params(p: dict) -> None:
         if ps not in {"a4", "a5", "letter", "legal"}:
             raise HTTPException(400, f"invalid paper_size: {ps}")
 
-    # tool_heights: accept list[float] or dict[str,int]=height
+    # tool_heights: accept list[float] or dict[str,int]=height (per-image mapping)
     th = p.get("tool_heights")
-    if th is not None:
+    if th is not None and th not in ("", {}):
         heights: list[float] = []
-        if isinstance(th, (list, tuple)):
-            heights = [float(x) for x in th]
-        elif isinstance(th, dict):
-            heights = [float(v) for v in th.values()]
+        try:
+            if isinstance(th, (list, tuple)):
+                heights = [float(x) for x in th if x not in (None, "")]
+            elif isinstance(th, dict):
+                heights = [float(v) for v in th.values() if v not in (None, "")]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "tool_heights contains non-numeric values")
         for h in heights:
             if not (1.0 <= h <= 200.0):
                 raise HTTPException(400, f"tool_height {h} mm out of range [1,200]")
 
-    # numeric ranges
+    # numeric ranges — tolerate empty string / null (means "auto" or "use default")
+    # for fields like axial_tolerance, height_units, phone_height, etc.
     for key, (lo, hi) in _PARAM_RANGES.items():
-        if key in p and p[key] is not None:
+        if key in p:
+            raw = p[key]
+            if raw is None:
+                continue
+            s = str(raw).strip()
+            if s == "":
+                continue  # "auto" / not specified by user
             try:
-                val = float(p[key])
+                val = float(s)
             except (TypeError, ValueError):
                 raise HTTPException(400, f"{key} must be a number")
             if not (lo <= val <= hi):
                 raise HTTPException(400, f"{key}={val} out of range [{lo},{hi}]")
 
-    # sam_corrective_points is a dict of lists; basic shape check only
+    # sam_corrective_points is a dict of lists (one per input stem).
+    # We only do a shallow type check here; deeper validation of the
+    # point objects happens later in _resolve_corrective_points.
     scp = p.get("sam_corrective_points")
     if scp is not None and not isinstance(scp, dict):
         raise HTTPException(400, "sam_corrective_points must be an object")
