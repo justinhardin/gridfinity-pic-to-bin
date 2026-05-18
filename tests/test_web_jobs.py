@@ -175,6 +175,33 @@ def test_phase_b_rejects_wrong_status(mgr, fake_pipeline):
         mgr.submit_phase_b(job)
 
 
+def test_phase_b_rerun_from_complete_merges_new_params(mgr, fake_pipeline):
+    """Proceeding on a COMPLETE job re-runs Phase B with the merged params.
+
+    The cached combined_layout.dxf is still good, so this is how the user
+    regenerates a fresh bin_config.json after editing a Phase-B-only knob
+    (tool_heights, height_units, min_units_z, stacking) on a finished job.
+    """
+    job = mgr.create_job(params={"tool_heights": 17.0, "stacking": True},
+                         input_files=[("a.png", b"X")])
+    mgr.submit_phase_a(job)
+    _wait_until(lambda: job.status == JobStatus.AWAITING_DECISION)
+    mgr.submit_phase_b(job)
+    _wait_until(lambda: job.status == JobStatus.COMPLETE)
+
+    # Second proceed with updated tool_height + stacking off.
+    mgr.submit_phase_b(job, new_params={"tool_heights": 22.0, "stacking": False})
+    _wait_until(lambda: job.status == JobStatus.COMPLETE and len(fake_pipeline) == 3)
+
+    third = fake_pipeline[2]
+    assert third["stop_after"] == "all"
+    assert third["skip_trace"] is True
+    assert third["kwargs"]["tool_heights"] == 22.0
+    assert third["kwargs"]["stacking"] is False
+    assert job.params["tool_heights"] == 22.0
+    assert job.params["stacking"] is False
+
+
 def test_redo_layout_only_uses_skip_trace(mgr, fake_pipeline):
     job = mgr.create_job(params={"tool_heights": 17.0, "gap": 3.0},
                          input_files=[("a.png", b"X")])

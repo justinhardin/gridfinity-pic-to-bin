@@ -369,13 +369,36 @@ class JobManager:
         job.status = JobStatus.RUNNING
         self._executor.submit(self._run_phase_a, job)
 
-    def submit_phase_b(self, job: JobState) -> None:
-        """Run prepare_bin to produce bin_config.json. Fast, no GPU needed."""
-        if job.status != JobStatus.AWAITING_DECISION or job.layout_result is None:
+    def submit_phase_b(
+        self, job: JobState, new_params: Optional[dict] = None,
+    ) -> None:
+        """Run prepare_bin to produce bin_config.json. Fast, no GPU needed.
+
+        Accepts proceed from ``AWAITING_DECISION`` (the original flow) or
+        ``COMPLETE`` (user changed a Phase-B param like tool_heights /
+        height_units / min_units_z / stacking on a finished job and wants
+        a fresh bin_config.json without re-tracing or re-laying out — the
+        cached combined_layout.dxf is still good).
+
+        ``new_params`` are merged into ``job.params`` before Phase B runs.
+        Layout-affecting changes (tolerance, gap, etc.) will be persisted
+        but won't take effect until the user does a Redo — proceed only
+        re-runs prepare_bin against the existing layout.
+        """
+        if job.layout_result is None or job.status not in (
+            JobStatus.AWAITING_DECISION, JobStatus.COMPLETE,
+        ):
             raise RuntimeError(
                 f"Job {job.id} cannot proceed from status {job.status}"
             )
+        if new_params:
+            merged = dict(job.params)
+            merged.update(new_params)
+            job.params = merged
+        job.final_result = None
+        job.error = None
         job.status = JobStatus.FINALIZING
+        self._persist_state(job)
         self._executor.submit(self._run_phase_b, job)
 
     def submit_redo(self, job: JobState, new_params: dict, layout_only: bool) -> None:

@@ -60,7 +60,7 @@ Bin Config Generation (prepare_bin.py)
          ↓
 EITHER:  Fusion 360 Add-In (pic_to_bin_addin/)
     [parametric bin body + ABS-white appearance + pockets + slots + base pads]
-         ↓  STL / STEP / PNG preview
+         ↓  Optional opt-in STL / STEP / PNG preview export to desktop
 OR:     Web app (pic_to_bin/web/) — FastAPI + Lit
     [drag-drop photos → SSE-streamed progress → preview → proceed/redo →
      downloads (PNG, PDF/SVG fit-test, DXF, JSON for the Fusion add-in)]
@@ -180,6 +180,8 @@ The Fusion side (`pic_to_bin_addin/_bin_builder.py`) builds the bin in a new doc
 6. **Base Pads** — single sketch with all wide-pad rounded rects + single Join extrude, then chamfer; same pattern for narrow posts. For an N×M grid this is 2 sketches + 2 extrudes + 2 chamfers regardless of N×M.
 
 The add-in entry point (`pic_to_bin_addin/pic_to_bin.py`) calls `importlib.reload(_bin_builder)` on every click so edits to `_bin_builder.py` land on the next button press without restarting Fusion. The file dialog defaults to the user's Desktop (Windows `%USERPROFILE%\Desktop` / macOS `~/Desktop`) when no `<project>/generated/bin_config.json` is found.
+
+Clicking the button first opens a small command dialog with three checkboxes (all default OFF): Save STL / STEP / preview PNG to desktop. With all unchecked the build only leaves the in-Fusion design — no files land on disk. Checked exports overwrite the corresponding `gridfinity_bin.{stl,step}` / `gridfinity_bin_preview.png` on the user's Desktop.
 
 ## Usage
 

@@ -729,22 +729,26 @@ def create_base_interface(root_comp, config):
 # Export and screenshot
 # ---------------------------------------------------------------------------
 
-def export_outputs(root_comp, config, output_dir):
+def _write_stl(root_comp, output_dir):
     app = adsk.core.Application.get()
     design = adsk.fusion.Design.cast(app.activeProduct)
-
     stl_path = os.path.join(output_dir, "gridfinity_bin.stl")
     export_mgr = design.exportManager
     stl_options = export_mgr.createSTLExportOptions(root_comp, stl_path)
     stl_options.meshRefinement = (
         adsk.fusion.MeshRefinementSettings.MeshRefinementMedium)
     export_mgr.execute(stl_options)
+    return stl_path
 
+
+def _write_step(root_comp, output_dir):
+    app = adsk.core.Application.get()
+    design = adsk.fusion.Design.cast(app.activeProduct)
     step_path = os.path.join(output_dir, "gridfinity_bin.step")
+    export_mgr = design.exportManager
     step_options = export_mgr.createSTEPExportOptions(step_path, root_comp)
     export_mgr.execute(step_options)
-
-    return stl_path, step_path
+    return step_path
 
 
 def capture_screenshot(output_dir, width=1920, height=1080):
@@ -784,11 +788,23 @@ def _group_phase(timeline, name, fn, *args, **kwargs):
             pass
 
 
-def build_bin(config_path: str, ui=None) -> dict:
+def build_bin(
+    config_path: str,
+    ui=None,
+    *,
+    write_stl: bool = False,
+    write_step: bool = False,
+    write_preview: bool = False,
+    export_dir: str = None,
+) -> dict:
     """Build the bin in a new document from the given config JSON.
 
-    Returns a dict with stl_path, step_path, preview_path (preview_path may be
-    a "(screenshot failed)..." string if capture failed but the model exported).
+    File exports (STL/STEP/preview PNG) are opt-in via the ``write_*`` flags
+    and land in ``export_dir``. With all flags False the build leaves only
+    the in-Fusion design — no files are written to disk.
+
+    Returns a dict with stl_path, step_path, preview_path; each entry is the
+    written file path, or None if that export was skipped or failed.
     """
     app = adsk.core.Application.get()
 
@@ -817,13 +833,18 @@ def build_bin(config_path: str, ui=None) -> dict:
     _group_phase(timeline, "Base Pads",
                  create_base_interface, root_comp, config)
 
-    output_dir = os.path.dirname(config_path)
-    stl_path, step_path = export_outputs(root_comp, config, output_dir)
-
-    try:
-        preview_path = capture_screenshot(output_dir)
-    except Exception:
-        preview_path = f"(screenshot failed)\n{traceback.format_exc()}"
+    stl_path = step_path = preview_path = None
+    if export_dir and (write_stl or write_step or write_preview):
+        os.makedirs(export_dir, exist_ok=True)
+        if write_stl:
+            stl_path = _write_stl(root_comp, export_dir)
+        if write_step:
+            step_path = _write_step(root_comp, export_dir)
+        if write_preview:
+            try:
+                preview_path = capture_screenshot(export_dir)
+            except Exception:
+                preview_path = f"(screenshot failed)\n{traceback.format_exc()}"
 
     return {
         "config": config,

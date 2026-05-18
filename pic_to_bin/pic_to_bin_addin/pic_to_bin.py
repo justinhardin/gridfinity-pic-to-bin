@@ -18,6 +18,12 @@ CMD_TOOLTIP = "Generate a gridfinity bin from a bin_config.json"
 WORKSPACE_ID = "FusionSolidEnvironment"
 PANEL_ID = "SolidCreatePanel"
 
+# Command input ids for the pre-build options dialog.
+INPUT_NOTE_ID = "picToBinNote"
+INPUT_STL_ID = "picToBinExportStl"
+INPUT_STEP_ID = "picToBinExportStep"
+INPUT_PREVIEW_ID = "picToBinExportPreview"
+
 # Resource folder for the toolbar icon (relative to this file).
 RESOURCES = "./resources/pic_to_bin"
 
@@ -80,17 +86,38 @@ class _ExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         ui = adsk.core.Application.get().userInterface
         try:
+            cmd_args = adsk.core.CommandEventArgs.cast(args)
+            inputs = cmd_args.command.commandInputs
+            write_stl = inputs.itemById(INPUT_STL_ID).value
+            write_step = inputs.itemById(INPUT_STEP_ID).value
+            write_preview = inputs.itemById(INPUT_PREVIEW_ID).value
+
             config_path = _pick_config(ui)
             if not config_path:
                 return
             builder = _import_builder()
-            result = builder.build_bin(config_path, ui=ui)
-            ui.messageBox(
-                "Bin created successfully!\n\n"
-                f"STL: {result['stl_path']}\n"
-                f"STEP: {result['step_path']}\n"
-                f"Preview: {result['preview_path']}",
-                CMD_NAME)
+            result = builder.build_bin(
+                config_path,
+                ui=ui,
+                write_stl=write_stl,
+                write_step=write_step,
+                write_preview=write_preview,
+                export_dir=_user_desktop(),
+            )
+
+            lines = ["Bin created successfully!"]
+            saved = [
+                ("STL", result.get("stl_path")),
+                ("STEP", result.get("step_path")),
+                ("Preview", result.get("preview_path")),
+            ]
+            saved = [(label, p) for label, p in saved if p]
+            if saved:
+                lines.append("")
+                lines.append("Saved to your desktop:")
+                for label, path in saved:
+                    lines.append(f"  {label}: {path}")
+            ui.messageBox("\n".join(lines), CMD_NAME)
         except Exception:
             ui.messageBox(
                 f"Error:\n{traceback.format_exc()}",
@@ -103,6 +130,44 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
     def notify(self, args):
         cmd = adsk.core.Command.cast(args.command)
+        cmd.okButtonText = "Build bin"
+
+        inputs = cmd.commandInputs
+        # Plain explainer above the checkboxes — TextBoxCommandInput is the
+        # idiomatic Fusion way to drop static help text into a command dialog.
+        # Keep this short — Fusion's command palette is narrow and the box
+        # truncates with "..." when text overflows the visible width.
+        inputs.addTextBoxCommandInput(
+            INPUT_NOTE_ID, "",
+            "Optionally save copies to your Desktop:",
+            1, True)
+        # Long labels get truncated and push the checkbox glyph itself off
+        # the right edge of the narrow palette, making the input look like
+        # plain text. Keep labels short; put the filename detail in the
+        # tooltipDescription (shown on hover) so users still see what file
+        # each option writes.
+        stl_in = inputs.addBoolValueInput(
+            INPUT_STL_ID, "Save STL to Desktop", True, "", False)
+        stl_in.tooltip = "Save STL to Desktop"
+        stl_in.tooltipDescription = (
+            "Writes gridfinity_bin.stl to your desktop. "
+            "Slicer-ready mesh export."
+        )
+        step_in = inputs.addBoolValueInput(
+            INPUT_STEP_ID, "Save STEP to Desktop", True, "", False)
+        step_in.tooltip = "Save STEP to Desktop"
+        step_in.tooltipDescription = (
+            "Writes gridfinity_bin.step to your desktop. "
+            "Re-importable parametric format."
+        )
+        preview_in = inputs.addBoolValueInput(
+            INPUT_PREVIEW_ID, "Save Preview PNG to Desktop", True, "", False)
+        preview_in.tooltip = "Save Preview PNG to Desktop"
+        preview_in.tooltipDescription = (
+            "Writes gridfinity_bin_preview.png to your desktop. "
+            "1920×1080 viewport screenshot of the finished bin."
+        )
+
         on_execute = _ExecuteHandler()
         cmd.execute.add(on_execute)
         _handlers.append(on_execute)

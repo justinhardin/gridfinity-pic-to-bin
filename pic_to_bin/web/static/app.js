@@ -693,16 +693,34 @@ class PicApp extends LitElement {
   };
 
   _onProceed = async () => {
+    // Forward the current form values so a user who edited e.g. tool_height
+    // or stacking on a complete job gets a fresh bin_config built with their
+    // new values. _buildParams returns null (and alerts) if the form isn't
+    // ready; in that case bail before touching state.
+    const params = this._buildParams();
+    if (params == null) return;
     this.running = true;
     this.errorMessage = null;
     this.eventLog = [...this.eventLog, {
       step: "bin_config", message: "Generating bin config...", fraction: 0.5,
     }];
-    const res = await fetch(`/jobs/${this.jobId}/proceed`, { method: "POST" });
+    // On a COMPLETE job _onComplete closed the SSE; reopen so the new run's
+    // bin_config / complete events reach the UI. The server replays event_log
+    // on subscribe so reopening doesn't miss anything. Also reset
+    // _seenComplete so _onComplete fires again on the fresh "complete" event
+    // and bumps artifactKey to cache-bust the regenerated bin_config.json.
+    this._seenComplete = false;
+    if (!this._eventSource) {
+      this._connectEvents(this.jobId);
+    }
+    const res = await fetch(`/jobs/${this.jobId}/proceed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ params }),
+    });
     if (!res.ok) {
       this._fail(`Proceed failed: ${await res.text()}`);
     }
-    // Wait for SSE "complete" event; existing EventSource is still listening.
   };
 
   _onRedo = async (e) => {
@@ -1353,7 +1371,9 @@ class PicProgress extends LitElement {
                 ${s.message ? html`<div class="hint">${s.message}</div>` : nothing}
                 ${i === 0 && subSteps.length > 0 ? html`
                   <ul class="substeps">
-                    ${subSteps.map(ss => html`<li>${ss.icon} ${ss.text}</li>`)}
+                    ${subSteps.map(ss => html`<li>${ss.icon === "…" 
+                        ? html`<span class="pending-ellipsis" aria-hidden="true">…</span>` 
+                        : ss.icon} ${ss.text}</li>`)}
                   </ul>
                 ` : nothing}
               </div>

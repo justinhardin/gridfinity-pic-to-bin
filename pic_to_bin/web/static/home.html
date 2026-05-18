@@ -89,30 +89,31 @@
         your Fusion API directory. <code>INSTALL.txt</code> inside has
         the exact paths for Windows and macOS — under a minute of setup.
       </p>
-      <p>
-        <a class="primary button-link" href="/download/fusion-addin.zip" download>
-          ⬇ Download Fusion add-in (.zip)
-        </a>
-      </p>
-      <details class="install-summary">
-        <summary>Show install steps</summary>
+
+      <div class="setup-block">
+        <h3>① Install the Fusion 360 add-in</h3>
+        <p>
+          Download the ZIP, extract it, then double-click the installer
+          for your OS. Takes about 30 seconds. Fusion 360 must already
+          be installed and opened at least once.
+        </p>
+        <p>
+          <a class="primary button-link" href="/download/fusion-addin.zip" download>
+            ⬇ Download Fusion add-in (.zip)
+          </a>
+        </p>
         <ol class="fusion-steps">
           <li>
-            Extract <code>pic-to-bin-fusion.zip</code>. You'll see two
-            folders inside: <code>Scripts/</code> and <code>AddIns/</code>.
+            Extract <code>pic-to-bin-fusion.zip</code>.
           </li>
           <li>
-            Open your Fusion 360 API directory:
+            Double-click the installer for your OS:
             <ul>
-              <li><strong>Windows:</strong> <code>%APPDATA%\Autodesk\Autodesk Fusion 360\API</code></li>
-              <li><strong>macOS:</strong> <code>~/Library/Application Support/Autodesk/Autodesk Fusion 360/API</code></li>
+              <li><strong>Windows:</strong> <code>install_windows.bat</code></li>
+              <li><strong>macOS:</strong> <code>install_macos.command</code></li>
             </ul>
-          </li>
-          <li>
-            Drag the <code>pic_to_bin</code> folder from the ZIP's
-            <code>Scripts/</code> into the API's <code>Scripts/</code> folder,
-            and the <code>pic_to_bin</code> folder from <code>AddIns/</code>
-            into the API's <code>AddIns/</code>.
+            It finds your Fusion API folder, copies the add-in into it,
+            and prints the next steps.
           </li>
           <li>
             In Fusion 360, press <strong>Shift+S</strong>, switch to the
@@ -125,7 +126,69 @@
             <em>Solid → Create → Gridfinity Pic-to-Bin</em>.
           </li>
         </ol>
-      </details>
+        <details class="install-summary">
+          <summary>Manual install (if the installer doesn't work)</summary>
+          <ol class="fusion-steps">
+            <li>
+              Open your Fusion 360 user-API folder (paste this into the
+              File Explorer / Finder address bar — not a terminal):
+              <ul>
+                <li><strong>Windows:</strong> <code>%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns</code></li>
+                <li><strong>macOS:</strong> <code>~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns</code></li>
+              </ul>
+            </li>
+            <li>
+              Drag the ZIP's <code>AddIns/pic_to_bin</code> folder there so
+              the final path ends with
+              <code>…/AddIns/pic_to_bin/pic_to_bin.py</code>.
+            </li>
+            <li>
+              Then follow the Fusion enable-on-startup step above.
+            </li>
+          </ol>
+          <p class="hint">
+            Note: <code>C:\…\AppData\Local\Autodesk\webdeploy\…</code>
+            is Fusion's bundled-add-ins folder and gets wiped on every
+            Fusion update — user add-ins do <strong>not</strong> go there.
+          </p>
+        </details>
+      </div>
+
+      <div class="setup-block">
+        <h3>② Print the ArUco template</h3>
+        <p>
+          Print on plain paper at <strong>100 % scale</strong> (no
+          fit-to-page). One template is reusable — print once and
+          photograph as many tools as you like. Pick the paper size
+          you'll load; the green chroma-key variant helps SAM2 segment
+          light or reflective tools.
+        </p>
+        <div class="template-picker">
+          <label class="template-field">
+            <span>Paper size</span>
+            <select id="tpl-size">
+              <option value="letter">US Letter (8.5 × 11 in)</option>
+              <option value="legal">US Legal (8.5 × 14 in)</option>
+              <option value="a5">A5 (148 × 210 mm)</option>
+            </select>
+          </label>
+          <label class="template-field">
+            <span>Background</span>
+            <select id="tpl-bg">
+              <option value="white">White</option>
+              <option value="green">Chroma-key green (#00B140)</option>
+            </select>
+          </label>
+        </div>
+        <p>
+          <a id="tpl-download"
+             class="primary button-link"
+             href="/static/templates/template_letter_white.pdf"
+             download="pic_to_bin_template_letter_white.pdf">
+            ⬇ Download template (PDF)
+          </a>
+        </p>
+      </div>
     </section>
 
     <!-- How it works -->

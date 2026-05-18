@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -400,17 +400,23 @@ def create_app(
         return EventSourceResponse(event_generator())
 
     @app.post("/jobs/{job_id}/proceed")
-    async def proceed(job_id: str) -> dict:
+    async def proceed(
+        job_id: str,
+        payload: Optional[dict] = Body(default=None),
+    ) -> dict:
         job = job_manager.get(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        if job.status != JobStatus.AWAITING_DECISION:
+        if job.status not in (JobStatus.AWAITING_DECISION, JobStatus.COMPLETE):
             raise HTTPException(
                 409,
                 f"job is in status {job.status.value}; "
-                f"can only proceed from {JobStatus.AWAITING_DECISION.value}",
+                f"can only proceed from awaiting_decision or complete",
             )
-        job_manager.submit_phase_b(job)
+        new_params = (payload or {}).get("params") or {}
+        if not isinstance(new_params, dict):
+            raise HTTPException(400, "params must be a JSON object")
+        job_manager.submit_phase_b(job, new_params=new_params)
         return {"job_id": job.id, "status": job.status.value}
 
     @app.post("/jobs/{job_id}/redo")
@@ -723,56 +729,62 @@ def create_app(
 _PACKAGE_ROOT = Path(__file__).parent.parent  # …/pic_to_bin
 _FUSION_SCRIPT_DIR = _PACKAGE_ROOT / "pic_to_bin_script"
 _FUSION_ADDIN_DIR = _PACKAGE_ROOT / "pic_to_bin_addin"
+_INSTALLERS_DIR = _PACKAGE_ROOT / "installers"
 
 _FUSION_INSTALL_TXT = """\
 Pic-to-Bin — Fusion 360 add-in install
 =======================================
 
-This ZIP contains the script + add-in form of the Pic-to-Bin Fusion 360
-plugin. After the one-time install you can build a Gridfinity bin from
-the web app's bin_config.json in a single click.
+This ZIP contains the Pic-to-Bin Fusion 360 add-in.
 
-Inside the ZIP
---------------
-  Scripts/pic_to_bin/   ← put inside <Fusion API>/Scripts/
-  AddIns/pic_to_bin/    ← put inside <Fusion API>/AddIns/
+Recommended: one-click installer
+--------------------------------
+  Windows : double-click  install_windows.bat
+  macOS   : double-click  install_macos.command
 
-Where is the Fusion API directory?
------------------------------------
-  Windows : %APPDATA%\\Autodesk\\Autodesk Fusion 360\\API
-            (paste that into the File Explorer address bar)
-  macOS   : ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API
+The installer detects your Fusion API folder, copies the add-in into
+it, and tells you how to enable it in Fusion. If Fusion 360 isn't
+installed yet, install it from
+https://www.autodesk.com/products/fusion/personal first and open it
+once, then re-run the installer.
 
-Install (one-time)
-------------------
-  1. Open the Fusion API folder above. You should see Scripts/ and
-     AddIns/ folders inside it (Fusion creates them on first run; if
-     they don't exist, create them).
-  2. Copy this ZIP's Scripts/pic_to_bin folder into <API>/Scripts/
-     (so the path ends with .../Scripts/pic_to_bin/pic_to_bin.py).
-  3. Copy this ZIP's AddIns/pic_to_bin folder into <API>/AddIns/
-     (so the path ends with .../AddIns/pic_to_bin/pic_to_bin.py).
-  4. Launch Fusion 360. Press Shift+S → Add-Ins tab → select
-     'pic_to_bin' → click Run. Tick "Run on Startup" so the button
-     shows up every session.
-  5. In a Design workspace, the new "Gridfinity Pic-to-Bin" button
-     appears under Solid → Create.
+After the installer succeeds, finish setup inside Fusion 360:
+  1. Press Shift+S, switch to the Add-Ins tab
+  2. Select 'pic_to_bin' and click Run
+  3. Tick "Run on Startup" so the button appears every session
+  4. The new button appears under Solid > Create > Gridfinity Pic-to-Bin
+
+Manual install (fallback)
+-------------------------
+If the installer doesn't work, drop the AddIns/pic_to_bin folder into
+Fusion's user API directory by hand:
+
+  Windows : %APPDATA%\\Autodesk\\Autodesk Fusion 360\\API\\AddIns
+            (paste that into the File Explorer address bar — File
+            Explorer expands %APPDATA%; PowerShell does not.)
+  macOS   : ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
+
+Drag this ZIP's AddIns/pic_to_bin folder there so the final path ends
+with .../AddIns/pic_to_bin/pic_to_bin.py, then follow steps 1-4 above.
+
+Note: C:\\Users\\<you>\\AppData\\Local\\Autodesk\\webdeploy\\... is
+Fusion's bundled-add-ins folder and gets wiped on every Fusion update.
+User add-ins do NOT go there.
 
 Use it
 ------
   1. In the Pic-to-Bin web app, finish a job and download the
      bin_config.json file.
-  2. In Fusion, click Solid → Create → Gridfinity Pic-to-Bin.
+  2. In Fusion, click Solid > Create > Gridfinity Pic-to-Bin.
   3. Select the bin_config.json. Fusion builds the parametric bin
      in seconds — every phase lives in its own named timeline group
      so you can keep editing afterward.
-  4. File → 3D Print (or Export → STL) to feed your slicer.
+  4. File > 3D Print (or Export > STL) to feed your slicer.
 
 Upgrades
 --------
   This ZIP always reflects the currently-deployed server. To upgrade,
-  re-download from the web app's Step 0 link and overwrite the two
-  pic_to_bin folders.
+  re-download from the web app's Step 0 link and re-run the installer.
 
 Source: https://github.com/justinhardin/gridfinity-pic-to-bin
 """
@@ -785,7 +797,9 @@ def _build_fusion_addin_zip() -> bytes:
     Fusion API folder, but boxed up for users who don't have the Python
     package installed locally. The shared ``_bin_builder.py`` is copied
     into both subfolders so each one is self-contained — same shape
-    ``fusion_install.install()`` produces.
+    ``fusion_install.install()`` produces. Also includes one-click
+    installer scripts at the ZIP root so users don't have to navigate
+    to Fusion's user-API folder by hand.
     """
     if not _FUSION_SCRIPT_DIR.is_dir() or not _FUSION_ADDIN_DIR.is_dir():
         # Should only happen in odd dev installs; surfacing as 500 is fine.
@@ -806,8 +820,44 @@ def _build_fusion_addin_zip() -> bytes:
                 rel = entry.relative_to(src_dir).as_posix()
                 zf.writestr(f"{arc_prefix}/{rel}", entry.read_bytes())
 
+    def add_installer(arc_name: str, src_path: Path,
+                      mode: int, line_ending: bytes) -> None:
+        """Add an installer script at the ZIP root with explicit Unix
+        permission bits and the right line endings.
+
+        - Windows .bat: CRLF line endings, mode 0o644 (executability not
+          carried by NTFS; .bat extension is what makes it runnable).
+        - macOS .command: LF line endings, mode 0o755 so Finder will
+          launch it on double-click without ``chmod +x`` first. The mode
+          is encoded in the high 16 bits of external_attr per the ZIP
+          spec; without this, macOS strips execute and the user gets the
+          "permission denied" dialog instead of a Terminal window.
+        """
+        if not src_path.is_file():
+            raise RuntimeError(f"Installer script missing: {src_path}")
+        text = src_path.read_text(encoding="utf-8")
+        # Normalize to LF first, then apply the requested line ending so
+        # we don't double-convert if the source file happens to be CRLF.
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        data = normalized.replace("\n", line_ending.decode("ascii")).encode("utf-8")
+        info = zipfile.ZipInfo(arc_name)
+        info.external_attr = (mode & 0xFFFF) << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(info, data)
+
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("INSTALL.txt", _FUSION_INSTALL_TXT)
+        if _INSTALLERS_DIR.is_dir():
+            add_installer(
+                "install_windows.bat",
+                _INSTALLERS_DIR / "install_windows.bat",
+                mode=0o644, line_ending=b"\r\n",
+            )
+            add_installer(
+                "install_macos.command",
+                _INSTALLERS_DIR / "install_macos.command",
+                mode=0o755, line_ending=b"\n",
+            )
         add_tree(_FUSION_SCRIPT_DIR, "Scripts/pic_to_bin")
         # The add-in needs its own copy of _bin_builder.py (mirrors what
         # fusion_install.py does on local installs).
