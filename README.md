@@ -25,6 +25,7 @@ A printed ArUco marker template handles perspective correction and automatic sca
 - [Fusion 360 integration](#fusion-360-integration)
 - [Troubleshooting](#troubleshooting)
 - [Running tests](#running-tests)
+- [License](#license)
 
 ---
 
@@ -577,3 +578,9 @@ Removes both the script and the add-in.
 ```bash
 python -m pytest tests/ -v
 ```
+
+---
+
+## License
+
+MIT — see [LICENSE.md](LICENSE.md).
