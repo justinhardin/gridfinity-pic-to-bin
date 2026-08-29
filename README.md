@@ -4,14 +4,52 @@ Generate 3D-printable gridfinity bins with custom tool cutouts from phone camera
 
 A printed ArUco marker template handles perspective correction and automatic scale calibration. The rest of the pipeline — SAM2 segmentation, vectorization, layout packing, and Fusion 360 bin generation — runs automatically.
 
-## Workflow overview
+## Contents
 
-```
-1. Print the ArUco template (one-time setup)
-2. Place tool on template, photograph from above
-3. Run pic-to-bin → get a Fusion 360 config JSON
-4. Click the "Gridfinity Pic-to-Bin" button in Fusion → get a parametric STL/STEP
-```
+- [Quick start](#quick-start)
+- [Installation](#installation)
+  - [1. The core code (required)](#1-the-core-code-required)
+  - [2. The web app (optional)](#2-the-web-app-optional)
+  - [3. The Fusion 360 add-in (optional)](#3-the-fusion-360-add-in-optional)
+  - [Where to run these commands](#where-to-run-these-commands)
+  - [Virtual environments (optional)](#virtual-environments-optional)
+  - [From source](#from-source)
+- [Step 1: Print the template](#step-1-print-the-template)
+- [Step 2: Take the photo](#step-2-take-the-photo)
+- [Step 3: Run the pipeline](#step-3-run-the-pipeline)
+  - [All `pic-to-bin` options](#all-pic-to-bin-options)
+  - [Bin sizing logic](#bin-sizing-logic)
+  - [Output files](#output-files)
+- [Web app (browser frontend)](#web-app-browser-frontend)
+- [Running individual steps](#running-individual-steps)
+- [Fusion 360 integration](#fusion-360-integration)
+- [Troubleshooting](#troubleshooting)
+- [Running tests](#running-tests)
+
+---
+
+## Quick start
+
+1. **[Install the pipeline](#installation)** — `pip install gridfinity-pic-to-bin`.
+   Optionally add the [web app](#2-the-web-app-optional) for a browser UI and
+   the [Fusion 360 add-in](#3-the-fusion-360-add-in-optional) for the 3D model.
+2. **[Print the ArUco template](#step-1-print-the-template)** —
+   `generate-phone-template --paper-size letter`. One-time setup; print at
+   exactly 100% scale, no fit-to-page.
+3. **[Photograph the tool on the template](#step-2-take-the-photo)** — lay the
+   tool in the dotted zone, shoot from above with all 8 markers in frame, and
+   measure the tool's depth with calipers.
+4. **[Run the pipeline](#step-3-run-the-pipeline)** —
+   `pic-to-bin photo.jpg --tool-height 17`. Produces `bin_config.json`, a
+   combined DXF, and [1:1 fit-test printouts](#output-files) you can lay the
+   real tool on before printing.
+5. **[Build the bin in Fusion 360](#fusion-360-integration)** — click
+   **Solid → Create → Gridfinity Pic-to-Bin**, then export STL or STEP and
+   slice it.
+
+Prefer a browser to a terminal? `pic-to-bin-web` replaces step 4 with
+drag-and-drop upload, live progress, and a layout preview — see
+[Web app](#web-app-browser-frontend).
 
 ---
 
