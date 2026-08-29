@@ -17,17 +17,20 @@ A printed ArUco marker template handles perspective correction and automatic sca
 
 ## Installation
 
-There are two things you can install, and they are layers of the same package
-rather than alternatives:
+Three pieces. Only the first is required.
 
-1. **The `gridfinity-pic-to-bin` code** — the pipeline itself, driven from the
-   command line. This is required.
-2. **The web app** — an optional browser frontend that wraps the exact same
-   pipeline. Installed as the `[web]` extra.
+| # | What | Command |
+|---|------|---------|
+| 1 | **The core code** — the pipeline that turns photos into a bin config | `pip install gridfinity-pic-to-bin` |
+| 2 | **The web app** *(optional)* — browser frontend over the same pipeline | `pip install "gridfinity-pic-to-bin[web]"` |
+| 3 | **The Fusion 360 add-in** *(optional)* — turns the bin config into a solid model | `pic-to-bin-fusion install` |
 
-Pick #1 if you are happy running commands in a terminal. Add #2 if you want a
-GUI, or want other people to be able to use the pipeline without touching a
-shell.
+The `[web]` extra is a superset, so #2 on its own also installs #1. #3 is a
+command from #1 that copies files into Fusion 360's add-ins folder; it needs
+Fusion 360 itself already installed.
+
+Run these from a dedicated working folder with a virtual environment active
+— see [Where to run these commands](#where-to-run-these-commands).
 
 ### 1. The core code (required)
 
@@ -35,10 +38,13 @@ shell.
 pip install gridfinity-pic-to-bin
 ```
 
-This installs everything that actually does the work: ArUco template
-generation, photo preprocessing (marker detection, perspective correction,
-scale calibration), SAM2 segmentation and vectorization, layout packing, the
-Fusion 360 config writer, and the Fusion add-in installer.
+Everything that actually does the work: ArUco template generation, photo
+preprocessing (marker detection, perspective correction, scale calibration),
+SAM2 segmentation and vectorization, layout packing, the Fusion 360 config
+writer, and the add-in installer.
+
+Install it if you are happy driving the pipeline from a terminal. It is also
+the base for both other pieces, so there is no way to skip it.
 
 It gives you these commands:
 
@@ -63,14 +69,14 @@ pip install "gridfinity-pic-to-bin[web]"
 pic-to-bin-web --port 8000          # http://localhost:8000
 ```
 
-This adds a FastAPI server plus a Lit frontend on top of the core code. It
+A FastAPI server plus a Lit frontend layered on top of the core code. It
 does **not** reimplement the pipeline — it calls the same `run_pipeline()`
 the CLI calls. What it adds is the interaction layer: drag-and-drop photo
 upload, live step-by-step progress streamed over SSE, an in-browser layout
 preview with printable fit-test downloads, a cheap Re-do loop that re-packs
 the layout without re-tracing, and one-click downloads of the DXF/PDF/JSON.
 
-Reasons to install it:
+Install it if:
 
 - You want a GUI instead of memorizing CLI flags.
 - You want to review the layout preview and tweak parameters interactively
@@ -82,26 +88,112 @@ Reasons to install it:
 Extra dependencies pulled in by `[web]`: `fastapi`, `uvicorn[standard]`,
 `python-multipart`, `sse-starlette`, `anthropic`, `python-dotenv`.
 
-The `[web]` extra is a superset — `pip install "gridfinity-pic-to-bin[web]"`
-installs the core code too, so you never need to run both commands.
-
 See [Web app](#web-app-browser-frontend) below for usage, and
 `pic_to_bin/web/README.md` for hosting it behind a public reverse proxy.
 
+### 3. The Fusion 360 add-in (optional)
+
+```bash
+pic-to-bin-fusion install
+```
+
+Copies the bundled add-in into Fusion 360's own add-ins directory
+(`%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\pic_to_bin\` on Windows,
+`~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/pic_to_bin/`
+on macOS). Nothing is installed into Fusion 360 itself — you need Fusion
+already installed, and it only runs on Windows and macOS.
+
+Once enabled inside Fusion, a **Gridfinity Pic-to-Bin** button appears under
+**Solid → Create**. Clicking it reads a `bin_config.json` and builds the
+whole parametric bin — body, stacking lip, deck, tool pockets, finger slots,
+and gridfinity base pads — in a fresh document, with optional STL/STEP/PNG
+export.
+
+Install it if you want the finished 3D model. Steps #1 and #2 stop at
+`bin_config.json` plus DXF/PDF files; this is the piece that turns those
+into printable geometry. Skip it if you only want the 1:1 fit-test printouts,
+or if you plan to import the DXF into some other CAD package yourself.
+
+The command is idempotent — re-run it after upgrading the package to refresh
+the installed copy. `pic-to-bin-fusion uninstall` removes it.
+
+See [Fusion 360 integration](#fusion-360-integration) below for enabling the
+add-in inside Fusion and what gets built.
+
+### Where to run these commands
+
+`pip install` does not care which directory you are in — but three things
+that come *after* it do, so it is worth setting up one working folder now
+and running everything from there:
+
+- `pic-to-bin` writes its results to `generated/` **relative to the current
+  directory**, and with no image arguments it processes every PNG/JPG in the
+  current directory.
+- `pic-to-bin-web` creates its `web_jobs/` directory in the current
+  directory.
+- Ultralytics downloads the SAM2 weights (`sam2.1_l.pt`, several hundred MB)
+  on the first trace, into the directory you ran from.
+
+So: make a dedicated folder in your home directory, put a virtual
+environment in it, and run every command from there with that venv active.
+
+**Windows — PowerShell, *not* "Run as Administrator":**
+
+```powershell
+mkdir $HOME\pic-to-bin
+cd $HOME\pic-to-bin
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install "gridfinity-pic-to-bin[web]"
+```
+
+`$HOME\pic-to-bin` resolves to `C:\Users\<you>\pic-to-bin`. If
+`Activate.ps1` is blocked by execution policy, run
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
+
+**macOS — Terminal:**
+
+```bash
+mkdir -p ~/pic-to-bin
+cd ~/pic-to-bin
+python3 -m venv .venv
+source .venv/bin/activate
+pip install "gridfinity-pic-to-bin[web]"
+```
+
+Every later session, `cd` back to that folder and re-activate the venv
+(`.\.venv\Scripts\Activate.ps1` on Windows, `source .venv/bin/activate` on
+macOS) before running `pic-to-bin`.
+
+**Locations to avoid on both platforms:**
+
+| Avoid | Why |
+|-------|-----|
+| Windows `Desktop`/`Documents` while OneDrive backup is on; macOS `Desktop`/`Documents` while iCloud "Desktop & Documents Folders" is on | Sync fights the multi-hundred-MB SAM2 weights and the per-job output folders, and cloud-only eviction can make files disappear mid-run |
+| `C:\Program Files`, `/Applications`, `/usr/local/lib` | Require admin rights; `pip` should never be writing there |
+| The system Python with no venv (`sudo pip install …`) | This package pulls PyTorch/Ultralytics/OpenCV with pinned versions — keep them off the system interpreter |
+| Deeply nested Windows paths | Some tooling still trips over the 260-character `MAX_PATH` limit |
+
+`pic-to-bin-fusion install` is the one exception: it copies files into
+Fusion 360's own add-ins directory, so it can be run from anywhere — it just
+needs the venv active.
+
 ### From source
+
+Clone wherever you normally keep code — `C:\Users\<you>\source\` on Windows,
+`~/src` on macOS — again avoiding cloud-synced folders:
 
 ```bash
 git clone https://github.com/justinhardin/gridfinity-pic-to-bin.git
 cd gridfinity-pic-to-bin
+python3 -m venv .venv          # Windows: py -m venv .venv
+source .venv/bin/activate      # Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[web]"        # or ".[dev]" / "." for core only
 ```
 
-### A note on Fusion 360
-
-Turning the generated `bin_config.json` into a solid body needs Fusion 360
-itself plus the add-in, installed separately with `pic-to-bin-fusion install`
-(see [Fusion 360 integration](#fusion-360-integration)). Neither install
-above bundles Fusion.
+An editable install still runs from anywhere, so you can keep the checkout
+here and run `pic-to-bin` from your working folder — or run it from the
+checkout and let `generated/` land next to the source (it is gitignored).
 
 ---
 
