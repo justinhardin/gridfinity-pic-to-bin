@@ -1,6 +1,7 @@
 name: Publish
 
-# Tag push (v0.1.0) -> PyPI.  Manual run -> TestPyPI rehearsal.
+# Tag push (v0.1.0) -> PyPI, then a GitHub release with the artifacts
+# attached.  Manual run -> TestPyPI rehearsal.
 #
 # Both jobs authenticate with PyPI via Trusted Publishing (OIDC), so there
 # are no API tokens stored in this repo.  One-time setup on each index:
@@ -81,3 +82,26 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Runs only after PyPI accepted the upload, so a release page can never
+  # advertise a version that failed to publish.
+  release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Open the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
