@@ -17,11 +17,91 @@ A printed ArUco marker template handles perspective correction and automatic sca
 
 ## Installation
 
+There are two things you can install, and they are layers of the same package
+rather than alternatives:
+
+1. **The `gridfinity-pic-to-bin` code** — the pipeline itself, driven from the
+   command line. This is required.
+2. **The web app** — an optional browser frontend that wraps the exact same
+   pipeline. Installed as the `[web]` extra.
+
+Pick #1 if you are happy running commands in a terminal. Add #2 if you want a
+GUI, or want other people to be able to use the pipeline without touching a
+shell.
+
+### 1. The core code (required)
+
 ```bash
 pip install gridfinity-pic-to-bin
 ```
 
-Dependencies (installed automatically): `ultralytics` (SAM2), `opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`, `Pillow`, `pillow-heif`.
+This installs everything that actually does the work: ArUco template
+generation, photo preprocessing (marker detection, perspective correction,
+scale calibration), SAM2 segmentation and vectorization, layout packing, the
+Fusion 360 config writer, and the Fusion add-in installer.
+
+It gives you these commands:
+
+| Command | Purpose |
+|---------|---------|
+| `pic-to-bin` | Run the whole pipeline: photos → `bin_config.json` |
+| `generate-phone-template` | Make the printable ArUco template PDF |
+| `preprocess-phone` | Photo → rectified, scale-calibrated image |
+| `trace-tool` | Rectified image → tool outline DXF/SVG |
+| `layout-tools` | Pack tool DXFs into one bin footprint |
+| `prepare-bin` | Combined layout → Fusion 360 config JSON |
+| `pic-to-bin-fusion` | Install/uninstall the Fusion 360 add-in |
+
+Dependencies (installed automatically): `ultralytics` (SAM2),
+`opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`,
+`Pillow`, `pillow-heif`.
+
+### 2. The web app (optional)
+
+```bash
+pip install "gridfinity-pic-to-bin[web]"
+pic-to-bin-web --port 8000          # http://localhost:8000
+```
+
+This adds a FastAPI server plus a Lit frontend on top of the core code. It
+does **not** reimplement the pipeline — it calls the same `run_pipeline()`
+the CLI calls. What it adds is the interaction layer: drag-and-drop photo
+upload, live step-by-step progress streamed over SSE, an in-browser layout
+preview with printable fit-test downloads, a cheap Re-do loop that re-packs
+the layout without re-tracing, and one-click downloads of the DXF/PDF/JSON.
+
+Reasons to install it:
+
+- You want a GUI instead of memorizing CLI flags.
+- You want to review the layout preview and tweak parameters interactively
+  before committing to a 3D print.
+- You want to serve other people. The web app is multi-user by design:
+  per-job UUID directories, a GPU semaphore so concurrent jobs queue instead
+  of fighting over SAM2, and a TTL sweep for old jobs.
+
+Extra dependencies pulled in by `[web]`: `fastapi`, `uvicorn[standard]`,
+`python-multipart`, `sse-starlette`, `anthropic`, `python-dotenv`.
+
+The `[web]` extra is a superset — `pip install "gridfinity-pic-to-bin[web]"`
+installs the core code too, so you never need to run both commands.
+
+See [Web app](#web-app-browser-frontend) below for usage, and
+`pic_to_bin/web/README.md` for hosting it behind a public reverse proxy.
+
+### From source
+
+```bash
+git clone https://github.com/justinhardin/gridfinity-pic-to-bin.git
+cd gridfinity-pic-to-bin
+pip install -e ".[web]"        # or ".[dev]" / "." for core only
+```
+
+### A note on Fusion 360
+
+Turning the generated `bin_config.json` into a solid body needs Fusion 360
+itself plus the add-in, installed separately with `pic-to-bin-fusion install`
+(see [Fusion 360 integration](#fusion-360-integration)). Neither install
+above bundles Fusion.
 
 ---
 
@@ -186,7 +266,7 @@ ready: per-job UUID directories, GPU semaphore around SAM2 so concurrent submiss
 queue rather than fight over the GPU, SSE-streamed progress.
 
 ```bash
-pip install -e ".[web]"
+pip install "gridfinity-pic-to-bin[web]"      # or: pip install -e ".[web]"
 pic-to-bin-web --port 8000
 ```
 
