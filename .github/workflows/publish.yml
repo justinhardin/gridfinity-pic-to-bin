@@ -26,20 +26,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check the tag matches the version in pyproject.toml
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          if [ "$tag" != "$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match project version $version"
-            exit 1
-          fi
-
       - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade build twine
           python -m build
+
+      # The version lives in pic_to_bin/__init__.py and reaches the wheel
+      # through hatchling, so compare the tag against what was actually built
+      # rather than re-deriving it from source.
+      - name: Check the tag matches the built version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(python -c "import pathlib; print(next(pathlib.Path('dist').glob('*.whl')).name.split('-')[1])")
+          if [ "$tag" != "$built" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match built version $built"
+            exit 1
+          fi
 
       - name: Check the metadata PyPI will render
         run: twine check --strict dist/*

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gridfinity-pic-to-bin"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Generate 3D-printable gridfinity bins from phone photos with ArUco template"
 readme = "README.md"
 license = "MIT"
@@ -80,6 +80,9 @@ validate-trace = "pic_to_bin.validate_trace:main"
 layout-tools = "pic_to_bin.layout_tools:main"
 prepare-bin = "pic_to_bin.prepare_bin:main"
 pic-to-bin-fusion = "pic_to_bin.fusion_install:main"
+
+[tool.hatch.version]
+path = "pic_to_bin/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pic_to_bin"]
