@@ -29,8 +29,10 @@ The `[web]` extra is a superset, so #2 on its own also installs #1. #3 is a
 command from #1 that copies files into Fusion 360's add-ins folder; it needs
 Fusion 360 itself already installed.
 
-Run these from a dedicated working folder with a virtual environment active
-— see [Where to run these commands](#where-to-run-these-commands).
+Run these from a dedicated working folder — see
+[Where to run these commands](#where-to-run-these-commands). A virtual
+environment is optional but recommended; see
+[Virtual environments](#virtual-environments-optional).
 
 ### 1. The core code (required)
 
@@ -134,16 +136,18 @@ and running everything from there:
 - Ultralytics downloads the SAM2 weights (`sam2.1_l.pt`, several hundred MB)
   on the first trace, into the directory you ran from.
 
-So: make a dedicated folder in your home directory, put a virtual
-environment in it, and run every command from there with that venv active.
+So: make a dedicated folder in your home directory and run every command
+from there. The two `venv` lines below are optional — see
+[Virtual environments](#virtual-environments-optional) for why you'd want
+one.
 
 **Windows — PowerShell, *not* "Run as Administrator":**
 
 ```powershell
 mkdir $HOME\pic-to-bin
 cd $HOME\pic-to-bin
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
+py -m venv .venv                  # optional
+.\.venv\Scripts\Activate.ps1      # optional
 pip install "gridfinity-pic-to-bin[web]"
 ```
 
@@ -156,14 +160,15 @@ pip install "gridfinity-pic-to-bin[web]"
 ```bash
 mkdir -p ~/pic-to-bin
 cd ~/pic-to-bin
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv             # optional
+source .venv/bin/activate         # optional
 pip install "gridfinity-pic-to-bin[web]"
 ```
 
-Every later session, `cd` back to that folder and re-activate the venv
+Every later session, `cd` back to that folder before running `pic-to-bin`
+— and, if you made a venv, re-activate it first
 (`.\.venv\Scripts\Activate.ps1` on Windows, `source .venv/bin/activate` on
-macOS) before running `pic-to-bin`.
+macOS).
 
 **Locations to avoid on both platforms:**
 
@@ -171,12 +176,42 @@ macOS) before running `pic-to-bin`.
 |-------|-----|
 | Windows `Desktop`/`Documents` while OneDrive backup is on; macOS `Desktop`/`Documents` while iCloud "Desktop & Documents Folders" is on | Sync fights the multi-hundred-MB SAM2 weights and the per-job output folders, and cloud-only eviction can make files disappear mid-run |
 | `C:\Program Files`, `/Applications`, `/usr/local/lib` | Require admin rights; `pip` should never be writing there |
-| The system Python with no venv (`sudo pip install …`) | This package pulls PyTorch/Ultralytics/OpenCV with pinned versions — keep them off the system interpreter |
+| `sudo pip install …` | Never needed, and it can break OS tooling that depends on the system Python |
 | Deeply nested Windows paths | Some tooling still trips over the 260-character `MAX_PATH` limit |
 
-`pic-to-bin-fusion install` is the one exception: it copies files into
-Fusion 360's own add-ins directory, so it can be run from anywhere — it just
-needs the venv active.
+`pic-to-bin-fusion install` is the one exception to the working-folder rule:
+it copies files into Fusion 360's own add-ins directory, so it can be run
+from anywhere.
+
+### Virtual environments (optional)
+
+A virtual environment is a private folder of Python packages that belongs to
+one project instead of the whole machine. **It is optional.** If this is the
+only Python project on your computer, `pip install gridfinity-pic-to-bin`
+into your normal Python works fine.
+
+Reasons to use one anyway:
+
+- **This package is heavy.** `ultralytics` pulls in PyTorch and torchvision
+  — a couple of GB — and `ultralytics`, `opencv-python` and `matplotlib`
+  each constrain the `numpy` version. Installed machine-wide, that can break
+  an unrelated project that wanted a different `numpy` or torch build.
+- **Some Pythons refuse the machine-wide install.** Homebrew Python on macOS
+  and most Linux distro Pythons mark themselves "externally managed"
+  ([PEP 668](https://peps.python.org/pep-0668/)) and reject `pip install`
+  outside a venv with `error: externally-managed-environment`. Windows
+  python.org installs have no such restriction.
+- **Clean uninstall.** Deleting the `.venv` folder removes every one of the
+  ~100 transitive dependencies at once. Undoing a machine-wide install means
+  chasing them individually.
+- **Reproducibility.** You can throw the venv away and rebuild it if an
+  upgrade goes sideways, without touching anything else.
+
+Setting one up is the two lines already shown above. For the details:
+
+- [Python docs — `venv`](https://docs.python.org/3/library/venv.html)
+- [Python Packaging User Guide — installing packages with pip and virtual
+  environments](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
 
 ### From source
 
@@ -186,8 +221,8 @@ Clone wherever you normally keep code — `C:\Users\<you>\source\` on Windows,
 ```bash
 git clone https://github.com/justinhardin/gridfinity-pic-to-bin.git
 cd gridfinity-pic-to-bin
-python3 -m venv .venv          # Windows: py -m venv .venv
-source .venv/bin/activate      # Windows: .\.venv\Scripts\Activate.ps1
+python3 -m venv .venv          # optional; Windows: py -m venv .venv
+source .venv/bin/activate      # optional; Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[web]"        # or ".[dev]" / "." for core only
 ```
 
