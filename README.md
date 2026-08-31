@@ -8,11 +8,13 @@ A printed ArUco marker template handles perspective correction and automatic sca
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
-  - [1. The core code (required)](#1-the-core-code-required)
-  - [2. The web app (optional)](#2-the-web-app-optional)
-  - [3. The Fusion 360 add-in (optional)](#3-the-fusion-360-add-in-optional)
+  - [Installing pipx](#installing-pipx)
+  - [1. The core code](#1-the-core-code)
+  - [2. The web app](#2-the-web-app)
+  - [3. The Fusion 360 add-in](#3-the-fusion-360-add-in)
   - [Where to run these commands](#where-to-run-these-commands)
-  - [Virtual environments (optional)](#virtual-environments-optional)
+  - [pipx, venv, or plain pip](#pipx-venv-or-plain-pip)
+  - [Upgrading and uninstalling](#upgrading-and-uninstalling)
   - [From source](#from-source)
 - [Step 1: Print the template](#step-1-print-the-template)
 - [Step 2: Take the photo](#step-2-take-the-photo)
@@ -31,9 +33,10 @@ A printed ArUco marker template handles perspective correction and automatic sca
 
 ## Quick start
 
-1. **[Install the pipeline](#installation)** — `pip install gridfinity-pic-to-bin`.
-   Optionally add the [web app](#2-the-web-app-optional) for a browser UI and
-   the [Fusion 360 add-in](#3-the-fusion-360-add-in-optional) for the 3D model.
+1. **[Install the pipeline](#installation)** —
+   `pipx install "gridfinity-pic-to-bin[web]"`. One command, and it covers all
+   three pieces: the CLI, the [web app](#2-the-web-app), and the bundled
+   [Fusion 360 add-in](#3-the-fusion-360-add-in).
 2. **[Print the ArUco template](#step-1-print-the-template)** —
    `generate-phone-template --paper-size letter`. One-time setup; print at
    exactly 100% scale, no fit-to-page.
@@ -56,27 +59,82 @@ drag-and-drop upload, live progress, and a layout preview — see
 
 ## Installation
 
-Three pieces. Only the first is required.
-
-| # | What | Command |
-|---|------|---------|
-| 1 | **The core code** — the pipeline that turns photos into a bin config | `pip install gridfinity-pic-to-bin` |
-| 2 | **The web app** *(optional)* — browser frontend over the same pipeline | `pip install "gridfinity-pic-to-bin[web]"` |
-| 3 | **The Fusion 360 add-in** *(optional)* — turns the bin config into a solid model | `pic-to-bin-fusion install` |
-
-The `[web]` extra is a superset, so #2 on its own also installs #1. #3 is a
-command from #1 that copies files into Fusion 360's add-ins folder; it needs
-Fusion 360 itself already installed.
-
-Run these from a dedicated working folder — see
-[Where to run these commands](#where-to-run-these-commands). A virtual
-environment is optional but recommended; see
-[Virtual environments](#virtual-environments-optional).
-
-### 1. The core code (required)
+**Recommended — one command:**
 
 ```bash
-pip install gridfinity-pic-to-bin
+pipx install "gridfinity-pic-to-bin[web]"
+```
+
+[pipx](https://pipx.pypa.io/) is the standard installer for Python
+*applications* — as opposed to libraries you `import`. It builds a private
+virtual environment for this package and puts its commands on your `PATH`, so
+there is no venv to create, activate, or remember, and nothing this package
+drags in can disturb the rest of your system. Don't have pipx yet? See
+[Installing pipx](#installing-pipx). If you would rather use a venv and plain
+`pip`, that still works — see
+[pipx, venv, or plain pip](#pipx-venv-or-plain-pip).
+
+That single command covers all three pieces of the project:
+
+| # | What | How you get it |
+|---|------|----------------|
+| 1 | **The core code** — the pipeline that turns photos into a bin config | Always installed |
+| 2 | **The web app** — browser frontend over the same pipeline | Included, via the `[web]` extra above |
+| 3 | **The Fusion 360 add-in** — turns the bin config into a solid model | Ships inside the package; run `pic-to-bin-fusion install` once to copy it into Fusion 360 |
+
+There is no second install to run. The `[web]` extra is a superset of the
+core install, and the Fusion add-in is bundled in the package itself —
+`pic-to-bin-fusion install` is a file copy into Fusion 360's own add-ins
+folder, not a download.
+
+**The `[web]` part of that command does matter, though.** The web app's
+*code* ships in the base package either way, so `pic-to-bin-web` appears on
+your `PATH` even without the extra — but its server dependencies (`fastapi`,
+`uvicorn`, …) arrive only with `[web]`, and without them the command exits
+immediately with `ModuleNotFoundError: No module named 'fastapi'`. If you
+already installed without the extra, add it in place:
+
+```bash
+pipx install --force "gridfinity-pic-to-bin[web]"
+```
+
+Want the CLI only, on a machine that will never serve a browser UI? Use
+`pipx install gridfinity-pic-to-bin`. The extra adds only a handful of small
+pure-Python packages next to the multi-GB PyTorch download that dominates the
+install either way, which is why `[web]` is the recommended default.
+
+Install from wherever you like — but **where you later run the commands does
+matter**; see [Where to run these commands](#where-to-run-these-commands).
+
+### Installing pipx
+
+**Windows — PowerShell, *not* "Run as Administrator":**
+
+```powershell
+py -m pip install --user pipx
+py -m pipx ensurepath
+```
+
+**macOS — Terminal:**
+
+```bash
+brew install pipx        # or: python3 -m pip install --user pipx
+pipx ensurepath
+```
+
+`ensurepath` edits your shell profile, so **close the terminal and open a new
+one** before continuing — that is what puts `pipx`, and the commands it
+installs, on your `PATH`.
+
+pipx builds each app's environment with your default Python. This package
+needs **Python 3.10 or newer**; if your default is older, point pipx at a
+newer one: `pipx install --python 3.12 "gridfinity-pic-to-bin[web]"`.
+
+### 1. The core code
+
+```bash
+pipx install "gridfinity-pic-to-bin[web]"   # recommended: core + web app
+pipx install gridfinity-pic-to-bin          # core only
 ```
 
 Everything that actually does the work: ArUco template generation, photo
@@ -103,12 +161,16 @@ Dependencies (installed automatically): `ultralytics` (SAM2),
 `opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`,
 `Pillow`, `pillow-heif`.
 
-### 2. The web app (optional)
+### 2. The web app
 
 ```bash
-pip install "gridfinity-pic-to-bin[web]"
-pic-to-bin-web --port 8000          # http://localhost:8000
+pipx install "gridfinity-pic-to-bin[web]"   # the same single install as above
+pic-to-bin-web --port 8000                  # http://localhost:8000
 ```
+
+This is not a second installation — it is the one package with its `[web]`
+extra. Already installed without the extra? `pipx install --force
+"gridfinity-pic-to-bin[web]"` adds it without disturbing anything else.
 
 A FastAPI server plus a Lit frontend layered on top of the core code. It
 does **not** reimplement the pipeline — it calls the same `run_pipeline()`
@@ -127,18 +189,23 @@ Install it if:
   of fighting over SAM2, and a TTL sweep for old jobs.
 
 Extra dependencies pulled in by `[web]`: `fastapi`, `uvicorn[standard]`,
-`python-multipart`, `sse-starlette`, `anthropic`, `python-dotenv`.
+`python-multipart`, `sse-starlette`, `anthropic`, `python-dotenv`. Those
+dependencies are the *only* thing the extra adds — the web app's own code and
+static assets are already in the base package. That is why `pic-to-bin-web`
+exists on your `PATH` after a plain install but fails with
+`ModuleNotFoundError: No module named 'fastapi'` until you add `[web]`.
 
 See [Web app](#web-app-browser-frontend) below for usage, and
 `pic_to_bin/web/README.md` for hosting it behind a public reverse proxy.
 
-### 3. The Fusion 360 add-in (optional)
+### 3. The Fusion 360 add-in
 
 ```bash
 pic-to-bin-fusion install
 ```
 
-Copies the bundled add-in into Fusion 360's own add-ins directory
+No download and no second install — the add-in files ship inside the Python
+package. This command copies them into Fusion 360's own add-ins directory
 (`%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\pic_to_bin\` on Windows,
 `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/pic_to_bin/`
 on macOS). Nothing is installed into Fusion 360 itself — you need Fusion
@@ -163,9 +230,11 @@ add-in inside Fusion and what gets built.
 
 ### Where to run these commands
 
-`pip install` does not care which directory you are in — but three things
-that come *after* it do, so it is worth setting up one working folder now
-and running everything from there:
+`pipx install` does not care which directory you are in, and because pipx
+puts the commands on your `PATH` there is no environment to activate later
+either. But three things that come *after* the install do care about your
+current directory, so it is worth setting up one working folder now and
+running everything from there:
 
 - `pic-to-bin` writes its results to `generated/` **relative to the current
   directory**, and with no image arguments it processes every PNG/JPG in the
@@ -176,86 +245,129 @@ and running everything from there:
   on the first trace, into the directory you ran from.
 
 So: make a dedicated folder in your home directory and run every command
-from there. The two `venv` lines below are optional — see
-[Virtual environments](#virtual-environments-optional) for why you'd want
-one.
+from there.
 
 **Windows — PowerShell, *not* "Run as Administrator":**
 
 ```powershell
+pipx install "gridfinity-pic-to-bin[web]"   # once, from anywhere
 mkdir $HOME\pic-to-bin
-cd $HOME\pic-to-bin
-py -m venv .venv                  # optional
-.\.venv\Scripts\Activate.ps1      # optional
-pip install "gridfinity-pic-to-bin[web]"
+cd $HOME\pic-to-bin                         # then work from here
 ```
 
-`$HOME\pic-to-bin` resolves to `C:\Users\<you>\pic-to-bin`. If
-`Activate.ps1` is blocked by execution policy, run
-`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
+`$HOME\pic-to-bin` resolves to `C:\Users\<you>\pic-to-bin`.
 
 **macOS — Terminal:**
 
 ```bash
+pipx install "gridfinity-pic-to-bin[web]"   # once, from anywhere
 mkdir -p ~/pic-to-bin
-cd ~/pic-to-bin
-python3 -m venv .venv             # optional
-source .venv/bin/activate         # optional
-pip install "gridfinity-pic-to-bin[web]"
+cd ~/pic-to-bin                             # then work from here
 ```
 
-Every later session, `cd` back to that folder before running `pic-to-bin`
-— and, if you made a venv, re-activate it first
-(`.\.venv\Scripts\Activate.ps1` on Windows, `source .venv/bin/activate` on
-macOS).
+Every later session, `cd` back to that folder before running `pic-to-bin`.
+With pipx there is nothing to activate — the commands are already on your
+`PATH`. (If you installed into a venv instead, re-activate it first:
+`.\.venv\Scripts\Activate.ps1` on Windows, `source .venv/bin/activate` on
+macOS.)
 
 **Locations to avoid on both platforms:**
 
 | Avoid | Why |
 |-------|-----|
 | Windows `Desktop`/`Documents` while OneDrive backup is on; macOS `Desktop`/`Documents` while iCloud "Desktop & Documents Folders" is on | Sync fights the multi-hundred-MB SAM2 weights and the per-job output folders, and cloud-only eviction can make files disappear mid-run |
-| `C:\Program Files`, `/Applications`, `/usr/local/lib` | Require admin rights; `pip` should never be writing there |
-| `sudo pip install …` | Never needed, and it can break OS tooling that depends on the system Python |
+| `C:\Program Files`, `/Applications`, `/usr/local/lib` | Require admin rights; `pip` and `pipx` should never be writing there |
+| `sudo pip install …` / `sudo pipx install …` | Never needed, and it can break OS tooling that depends on the system Python |
 | Deeply nested Windows paths | Some tooling still trips over the 260-character `MAX_PATH` limit |
 
 `pic-to-bin-fusion install` is the one exception to the working-folder rule:
 it copies files into Fusion 360's own add-ins directory, so it can be run
 from anywhere.
 
-### Virtual environments (optional)
+### pipx, venv, or plain pip
 
-A virtual environment is a private folder of Python packages that belongs to
-one project instead of the whole machine. **It is optional.** If this is the
-only Python project on your computer, `pip install gridfinity-pic-to-bin`
-into your normal Python works fine.
+pipx is the recommended installer here because this package is an
+*application* — you run `pic-to-bin` from a terminal, you don't `import
+pic_to_bin` from your own code. pipx is built for exactly that case: it
+creates a dedicated virtual environment behind the scenes and exposes only
+the commands.
 
-Reasons to use one anyway:
+**Why isolation matters for this package in particular:**
 
-- **This package is heavy.** `ultralytics` pulls in PyTorch and torchvision
-  — a couple of GB — and `ultralytics`, `opencv-python` and `matplotlib`
-  each constrain the `numpy` version. Installed machine-wide, that can break
-  an unrelated project that wanted a different `numpy` or torch build.
-- **Some Pythons refuse the machine-wide install.** Homebrew Python on macOS
-  and most Linux distro Pythons mark themselves "externally managed"
-  ([PEP 668](https://peps.python.org/pep-0668/)) and reject `pip install`
-  outside a venv with `error: externally-managed-environment`. Windows
-  python.org installs have no such restriction.
-- **Clean uninstall.** Deleting the `.venv` folder removes every one of the
-  ~100 transitive dependencies at once. Undoing a machine-wide install means
-  chasing them individually.
-- **Reproducibility.** You can throw the venv away and rebuild it if an
-  upgrade goes sideways, without touching anything else.
+- **It is heavy.** `ultralytics` pulls in PyTorch and torchvision — a couple
+  of GB — and `ultralytics`, `opencv-python` and `matplotlib` each constrain
+  the `numpy` version. Installed machine-wide with `pip`, that can break an
+  unrelated project that wanted a different `numpy` or torch build.
+- **Some Pythons refuse a machine-wide install outright.** Homebrew Python
+  on macOS and most Linux distro Pythons mark themselves "externally
+  managed" ([PEP 668](https://peps.python.org/pep-0668/)) and reject
+  `pip install` outside a virtual environment with
+  `error: externally-managed-environment`. pipx sidesteps this entirely;
+  plain `pip` does not.
+- **Clean uninstall.** `pipx uninstall gridfinity-pic-to-bin` takes all ~100
+  transitive dependencies with it. Undoing a machine-wide `pip install`
+  means chasing them individually.
+- **Nothing to activate.** A venv only works once you remember to activate
+  it, in every new terminal, which is easy to get wrong when you also have
+  to `cd` to a working folder. pipx commands are simply on your `PATH`.
 
-Setting one up is the two lines already shown above. For the details:
+**When plain `pip` in a venv is still the right call:**
 
+- **You are working on the source.** Editable installs (`pip install -e .`)
+  and the `[dev]` test dependencies belong in a venv — see
+  [From source](#from-source).
+- **You want to `import pic_to_bin` from your own scripts.** pipx's
+  environment is deliberately not on your import path; a venv is.
+- **You need a specific PyTorch build**, e.g. a CUDA wheel from
+  `download.pytorch.org`. That is easier to control in a venv. It is still
+  possible under pipx via
+  `pipx runpip gridfinity-pic-to-bin install torch --index-url …`, just
+  fiddlier.
+
+For a venv install, replace the `pipx install` line with the usual three:
+
+```bash
+python3 -m venv .venv          # Windows: py -m venv .venv
+source .venv/bin/activate      # Windows: .\.venv\Scripts\Activate.ps1
+pip install "gridfinity-pic-to-bin[web]"
+```
+
+On Windows, if `Activate.ps1` is blocked by execution policy, run
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
+
+Further reading:
+
+- [pipx documentation](https://pipx.pypa.io/)
 - [Python docs — `venv`](https://docs.python.org/3/library/venv.html)
 - [Python Packaging User Guide — installing packages with pip and virtual
   environments](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
 
+### Upgrading and uninstalling
+
+```bash
+pipx upgrade gridfinity-pic-to-bin      # keeps the extras you installed with
+pipx uninstall gridfinity-pic-to-bin    # removes the package and every dependency
+```
+
+pipx records the exact spec you installed — including `[web]` — so
+`pipx upgrade` keeps the web app. To change your mind about the extra, use
+`pipx install --force` with the spec you want.
+
+Two things live outside the package and are not touched by either command:
+
+- The Fusion 360 add-in copy. Re-run `pic-to-bin-fusion install` after an
+  upgrade to refresh it, and `pic-to-bin-fusion uninstall` before removing
+  the package.
+- The SAM2 weights (`sam2.1_l.pt`) and the `generated/` and `web_jobs/`
+  folders in your working directory. Delete those by hand if you want the
+  disk space back.
+
 ### From source
 
-Clone wherever you normally keep code — `C:\Users\<you>\source\` on Windows,
-`~/src` on macOS — again avoiding cloud-synced folders:
+pipx installs the tool for *using*; to work on the code itself, use a venv
+and an editable install. Clone wherever you normally keep code —
+`C:\Users\<you>\source\` on Windows, `~/src` on macOS — again avoiding
+cloud-synced folders:
 
 ```bash
 git clone https://github.com/justinhardin/gridfinity-pic-to-bin.git
@@ -432,7 +544,7 @@ ready: per-job UUID directories, GPU semaphore around SAM2 so concurrent submiss
 queue rather than fight over the GPU, SSE-streamed progress.
 
 ```bash
-pip install "gridfinity-pic-to-bin[web]"      # or: pip install -e ".[web]"
+pipx install "gridfinity-pic-to-bin[web]"     # from a checkout: pip install -e ".[web]"
 pic-to-bin-web --port 8000
 ```
 
@@ -444,7 +556,9 @@ The browser back button navigates between screens (form → progress → preview
 → downloads). The form fields all have an `(i)` info button next to their
 label that opens a modal with a multi-paragraph explanation.
 
-To replace the default `esm.sh` Lit import with a vendored local copy:
+Lit is vendored inside the package (`pic_to_bin/web/static/lit-all.min.js`),
+so the page loads with no CDN request and works offline. To re-download it
+after deleting it, or to bump the pinned version:
 
 ```bash
 python -m pic_to_bin.web.vendor_lit

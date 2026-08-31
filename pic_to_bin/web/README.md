@@ -10,7 +10,7 @@ parameters cheaply (re-doing the layout reuses cached per-tool DXFs).
 |------|---------|
 | `server.py` | FastAPI routes + uvicorn launcher (`pic-to-bin-web`). Endpoints: `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events` (SSE), `POST /jobs/{id}/proceed`, `POST /jobs/{id}/redo`, `GET /jobs/{id}/artifacts/{name}`, `POST /preview` (HEIC thumbnail conversion). |
 | `jobs.py` | `JobManager` — UUID registry, ThreadPoolExecutor, GPU semaphore, async SSE event fan-out, TTL sweep, and the `sanitize_part_name`/`download_filename` helpers used to rename downloads. |
-| `vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` — downloads `lit-all.min.js` into `static/` and rewrites the import map for an offline-deployable build. |
+| `vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` — re-downloads the vendored `static/lit-all.min.js`. Only needed to restore a missing file or bump the pinned Lit version; the bundle ships with the package. |
 | `__init__.py` | Re-exports `create_app` and the cli entry point. |
 | `static/` | Frontend (Lit components + CSS). See `static/README.md`. |
 
@@ -111,7 +111,7 @@ Use `mod_proxy`, `mod_proxy_http`, `mod_ratelimit`, `LimitRequestBody 157286400`
 - **LLM cost abuse**: Completely disabled on public instances. Even an env var leak does nothing unless `--enable-llm` is also passed.
 - **Path traversal / file disclosure**: UUID job dirs + strict whitelists for artifacts, inputs, and overlays. No user-controlled paths reach the filesystem.
 - **Information leaks**: Exception handler returns only a generic message; full tracebacks stay in logs.
-- **Clickjacking / MIME / XSS / CSP bypass**: Strong headers + CSP (tuned for Lit). Vendoring Lit (`python -m pic_to_bin.web.vendor_lit`) removes the esm.sh dependency entirely.
+- **Clickjacking / MIME / XSS / CSP bypass**: Strong headers + CSP (tuned for Lit). Lit is vendored, so `script-src` is same-origin only — no CDN is in the trust path.
 - **CSRF**: No cookie-based authentication or session state. All actions are job-UUID based. Rate limiting + size limits make "drive-by job creation" harmless.
 
 ### Monitoring after go-live
@@ -123,10 +123,14 @@ Use `mod_proxy`, `mod_proxy_http`, `mod_ratelimit`, `LimitRequestBody 157286400`
 
 With these settings you can host the service publicly and sleep soundly.
 
-## Vendoring Lit (supply-chain & CSP win)
+## Vendored Lit (supply-chain & CSP win)
+
+Lit ships inside the package as `static/lit-all.min.js`, and the import map in `index.html` points at it. Every HTTP request the browser makes is to your own origin — good for a strict CSP and for air-gapped deploys, and it is what makes the `script-src 'self' 'unsafe-inline' blob:` policy above work as-is.
+
+To restore the file if it went missing, or to move to a newer pinned Lit:
 
 ```bash
 python -m pic_to_bin.web.vendor_lit
 ```
 
-This downloads `lit-all.min.js` into `static/` and rewrites the import map. After this step the only HTTP requests the browser makes are to your own origin (plus the SSE and artifact downloads). Perfect for strict CSP or air-gapped deploys.
+If the bundle is absent the server notices, logs a warning, rewrites the import map to `https://esm.sh` as it serves `/app`, and adds that origin to `script-src` so the page still loads. That is a fallback, not the intended deployment.

@@ -87,12 +87,16 @@ gridfinity-pic-to-bin/
             __init__.py
             jobs.py                  # JobManager: UUID registry, GPU semaphore, SSE
             server.py                # FastAPI routes + uvicorn cli() + Fusion ZIP builder
-            vendor_lit.py            # `python -m … vendor_lit` to vendor Lit locally
+            vendor_lit.py            # `python -m … vendor_lit` re-downloads static/lit-all.min.js
             static/
+                lit-all.min.js       # Vendored Lit 3.2.1 (committed; no CDN at runtime)
                 home.html            # Public landing page at /
                 index.html           # Importmap-based Lit loader at /app
                 app.js               # PicApp / Form / Progress / Preview / Downloads
                 styles.css
+        installers/                  # One-click Fusion installers bundled into
+            install_windows.bat      #   the /download/fusion-addin.zip root
+            install_macos.command
         pic_to_bin_addin/            # Fusion 360 add-in (only Fusion entry point)
             pic_to_bin.py            # add-in entry (registers Solid > Create button)
             _bin_builder.py          # build logic — sketches, timeline groups, exports
@@ -123,9 +127,9 @@ gridfinity-pic-to-bin/
 | `layout_tools.py` | Layout packing + `generate_preview` (PNG) + `generate_fit_test_drawing` (PDF/SVG at 1:1 mm scale for printing) |
 | `prepare_bin.py` | Centers the combined cutout in the bin, writes Fusion JSON config |
 | `web/jobs.py` | `JobManager`: UUID registry, ThreadPoolExecutor, GPU semaphore around SAM2, async SSE event fan-out, TTL sweep |
-| `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving |
+| `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving. `_build_fusion_addin_zip()` bundles `pic_to_bin_addin/` + `installers/` into `AddIns/pic_to_bin` on each `/download/fusion-addin.zip` request — it reads those dirs off disk, so renaming either one breaks the endpoint at request time |
 | `web/static/app.js` | Lit components: `pic-app` (root, owns modal + history), `pic-form`, `pic-progress`, `pic-preview` (with fit-test card), `pic-downloads`. `FIELD_INFO` map drives the (i) info modals |
-| `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into `static/` and rewrites the `index.html` import map |
+| `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` re-downloads the vendored `static/lit-all.min.js` (pinned `lit/dist` bundle). Only needed to restore a deleted file or bump the version |
 | `pic_to_bin_addin/pic_to_bin.py` | Add-in entry — registers a "Gridfinity Pic-to-Bin" button in Solid > Create |
 | `pic_to_bin_addin/_bin_builder.py` | Fusion build code — sketch consolidation, named timeline groups, ABS (White) appearance, STL/STEP/PNG export |
 | `fusion_install.py` | `pic-to-bin-fusion install` copies the add-in into `…/API/AddIns/pic_to_bin/`. Uninstall also cleans up the legacy `…/API/Scripts/pic_to_bin/` folder for users who installed pre-consolidation. |
@@ -209,7 +213,7 @@ pic-to-bin-fusion install
 # Web app (multi-user; FastAPI + Lit frontend)
 pip install -e ".[web]"
 pic-to-bin-web --port 8000           # opens at http://localhost:8000
-python -m pic_to_bin.web.vendor_lit  # optional: vendor Lit locally
+python -m pic_to_bin.web.vendor_lit  # only to refresh the vendored Lit bundle
 
 # Run tests
 python -m pytest tests/ -v
@@ -237,10 +241,14 @@ day one:
 - **Server-Sent Events** stream `ProgressEvent`s from worker threads to the
   browser via `loop.call_soon_threadsafe`. The job's event log is replayed on
   late connections.
-- **Frontend stack**: Lit components served as static files. Default
-  `index.html` import map points at `esm.sh`; running
-  `python -m pic_to_bin.web.vendor_lit` downloads `lit-all.min.js` into
-  `static/` and rewrites the import map for a fully self-contained deploy.
+- **Frontend stack**: Lit components served as static files. Lit itself is
+  vendored (`static/lit-all.min.js`, committed and shipped in the wheel) and
+  the `index.html` import map points at it, so the browser makes no CDN
+  request — required, since the server's CSP is `script-src 'self'
+  'unsafe-inline' blob:`. If the bundle is missing, `server.py` falls back to
+  the `esm.sh` import map *and* widens `script-src` to match, so the two can
+  never drift out of sync. The bundle has no `lit/decorators.js` export;
+  `app.js` uses `static properties`. `vendor_lit.py` re-downloads it.
 - **Browser back navigates between screens** instead of leaving the site.
   `PicApp` captures each screen change via `history.pushState` in `updated()`
   and restores from `popstate`. Initial state is `replaceState` so back from
