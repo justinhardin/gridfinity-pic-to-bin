@@ -767,7 +767,6 @@ def create_app(
 # ---------------------------------------------------------------------------
 
 _PACKAGE_ROOT = Path(__file__).parent.parent  # …/pic_to_bin
-_FUSION_SCRIPT_DIR = _PACKAGE_ROOT / "pic_to_bin_script"
 _FUSION_ADDIN_DIR = _PACKAGE_ROOT / "pic_to_bin_addin"
 _INSTALLERS_DIR = _PACKAGE_ROOT / "installers"
 
@@ -831,22 +830,18 @@ Source: https://github.com/justinhardin/gridfinity-pic-to-bin
 
 
 def _build_fusion_addin_zip() -> bytes:
-    """Bundle pic_to_bin_script + pic_to_bin_addin into a self-installable ZIP.
+    """Bundle pic_to_bin_addin into a self-installable ZIP.
 
     Matches the layout that ``fusion_install.py`` would write into the
     Fusion API folder, but boxed up for users who don't have the Python
-    package installed locally. The shared ``_bin_builder.py`` is copied
-    into both subfolders so each one is self-contained — same shape
-    ``fusion_install.install()`` produces. Also includes one-click
-    installer scripts at the ZIP root so users don't have to navigate
-    to Fusion's user-API folder by hand.
+    package installed locally. The add-in is the only Fusion entry point,
+    so the ZIP holds a single ``AddIns/pic_to_bin`` tree. Also includes
+    one-click installer scripts at the ZIP root so users don't have to
+    navigate to Fusion's user-API folder by hand.
     """
-    if not _FUSION_SCRIPT_DIR.is_dir() or not _FUSION_ADDIN_DIR.is_dir():
+    if not _FUSION_ADDIN_DIR.is_dir():
         # Should only happen in odd dev installs; surfacing as 500 is fine.
-        raise RuntimeError(
-            f"Fusion bundle dirs not found at {_FUSION_SCRIPT_DIR} / "
-            f"{_FUSION_ADDIN_DIR}"
-        )
+        raise RuntimeError(f"Fusion add-in dir not found at {_FUSION_ADDIN_DIR}")
 
     buf = io.BytesIO()
     skip_dirs = {"__pycache__", ".vscode"}
@@ -858,7 +853,14 @@ def _build_fusion_addin_zip() -> bytes:
                 continue
             if entry.is_file():
                 rel = entry.relative_to(src_dir).as_posix()
-                zf.writestr(f"{arc_prefix}/{rel}", entry.read_bytes())
+                # writestr() defaults to mode 0600, which survives the
+                # unzip; 0644 is what a normal file in Fusion's API folder
+                # looks like, and keeps the add-in readable if the user
+                # installs it for a different account.
+                info = zipfile.ZipInfo(f"{arc_prefix}/{rel}")
+                info.external_attr = 0o644 << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(info, entry.read_bytes())
 
     def add_installer(arc_name: str, src_path: Path,
                       mode: int, line_ending: bytes) -> None:
@@ -898,16 +900,9 @@ def _build_fusion_addin_zip() -> bytes:
                 _INSTALLERS_DIR / "install_macos.command",
                 mode=0o755, line_ending=b"\n",
             )
-        add_tree(_FUSION_SCRIPT_DIR, "Scripts/pic_to_bin")
-        # The add-in needs its own copy of _bin_builder.py (mirrors what
-        # fusion_install.py does on local installs).
+        # _bin_builder.py already lives inside the add-in dir, so the
+        # tree copy is the whole bundle.
         add_tree(_FUSION_ADDIN_DIR, "AddIns/pic_to_bin")
-        builder = _FUSION_SCRIPT_DIR / "_bin_builder.py"
-        if builder.exists():
-            zf.writestr(
-                "AddIns/pic_to_bin/_bin_builder.py",
-                builder.read_bytes(),
-            )
 
     return buf.getvalue()
 

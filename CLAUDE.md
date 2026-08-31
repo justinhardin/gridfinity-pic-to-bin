@@ -94,6 +94,9 @@ gridfinity-pic-to-bin/
                 index.html           # Importmap-based Lit loader at /app
                 app.js               # PicApp / Form / Progress / Preview / Downloads
                 styles.css
+        installers/                  # One-click Fusion installers bundled into
+            install_windows.bat      #   the /download/fusion-addin.zip root
+            install_macos.command
         pic_to_bin_addin/            # Fusion 360 add-in (only Fusion entry point)
             pic_to_bin.py            # add-in entry (registers Solid > Create button)
             _bin_builder.py          # build logic — sketches, timeline groups, exports
@@ -124,7 +127,7 @@ gridfinity-pic-to-bin/
 | `layout_tools.py` | Layout packing + `generate_preview` (PNG) + `generate_fit_test_drawing` (PDF/SVG at 1:1 mm scale for printing) |
 | `prepare_bin.py` | Centers the combined cutout in the bin, writes Fusion JSON config |
 | `web/jobs.py` | `JobManager`: UUID registry, ThreadPoolExecutor, GPU semaphore around SAM2, async SSE event fan-out, TTL sweep |
-| `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving |
+| `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving. `_build_fusion_addin_zip()` bundles `pic_to_bin_addin/` + `installers/` into `AddIns/pic_to_bin` on each `/download/fusion-addin.zip` request — it reads those dirs off disk, so renaming either one breaks the endpoint at request time |
 | `web/static/app.js` | Lit components: `pic-app` (root, owns modal + history), `pic-form`, `pic-progress`, `pic-preview` (with fit-test card), `pic-downloads`. `FIELD_INFO` map drives the (i) info modals |
 | `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` re-downloads the vendored `static/lit-all.min.js` (pinned `lit/dist` bundle). Only needed to restore a deleted file or bump the version |
 | `pic_to_bin_addin/pic_to_bin.py` | Add-in entry — registers a "Gridfinity Pic-to-Bin" button in Solid > Create |
