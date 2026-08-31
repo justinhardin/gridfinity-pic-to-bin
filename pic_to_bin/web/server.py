@@ -44,6 +44,17 @@ from pic_to_bin.web.jobs import (
 logger = logging.getLogger("pic_to_bin.web")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Lit ships vendored in static/ so the browser never needs a third-party CDN
+# (which the CSP below blocks anyway). If the bundle is missing — a stripped
+# checkout, a partial install — we fall back to the CDN and widen the CSP for
+# it, so a missing file degrades to "works, with a CDN hop" instead of a
+# blank page. See _lit_is_vendored() / _serve_html().
+LIT_BUNDLE = STATIC_DIR / "lit-all.min.js"
+LIT_LOCAL_URL = "/static/lit-all.min.js"
+LIT_CDN_ORIGIN = "https://esm.sh"
+LIT_CDN_URL = f"{LIT_CDN_ORIGIN}/lit@3.2.1"
+
 ARTIFACT_WHITELIST = {
     "layout_preview.png": ("image/png", "layout_preview.png"),
     "layout_actual_size.pdf": ("application/pdf", "layout_actual_size.pdf"),
@@ -52,6 +63,10 @@ ARTIFACT_WHITELIST = {
     "bin_config.json": ("application/json", "bin_config.json"),
 }
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif"}
+
+
+def _lit_is_vendored() -> bool:
+    return LIT_BUNDLE.is_file()
 
 
 # Sane ranges for numeric pipeline parameters (used by _validate_params).
@@ -177,12 +192,16 @@ def create_app(
             "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
         )
         # CSP tuned for Lit + importmap + SSE + data: previews.
-        # When you run `python -m pic_to_bin.web.vendor_lit` the only external
-        # script is gone; you can then drop 'unsafe-inline' for scripts if you
-        # also externalise the importmap into a tiny static file.
+        # Lit is vendored, so scripts are same-origin only; the CDN origin is
+        # added back solely when the vendored bundle is missing, matching the
+        # import map _serve_html() then emits. 'unsafe-inline' is still needed
+        # for the inline <script type="importmap"> block.
+        script_src = "'self' 'unsafe-inline' blob:"
+        if not _lit_is_vendored():
+            script_src += f" {LIT_CDN_ORIGIN}"
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' blob:; "
+            f"script-src {script_src}; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "connect-src 'self' ws: wss:; "
@@ -221,8 +240,15 @@ def create_app(
         # proper response auto-attaches the project source for in-browser
         # editing. Spec:
         # https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/ecosystem/automatic_workspace_folders.md
+        #
+        # Only answer when we're running from a source checkout. Installed
+        # copies (pipx, pip) resolve this to site-packages, which is not a
+        # project — DevTools rejects it with "Unable to add filesystem:
+        # <illegal path>" in the console. 404 keeps that noise out.
         import uuid as _uuid
         project_root = STATIC_DIR.parent.parent.parent
+        if not (project_root / "pyproject.toml").is_file():
+            raise HTTPException(status_code=404, detail="Not found")
         return {
             "workspace": {
                 "root": str(project_root),
@@ -256,7 +282,21 @@ def create_app(
 
     @app.get("/app", response_class=HTMLResponse)
     async def app_page() -> HTMLResponse:
-        return _serve_html("index.html", ("app.js", "styles.css"))
+        response = _serve_html("index.html", ("app.js", "styles.css"))
+        if not _lit_is_vendored():
+            # Keep the page working without the vendored bundle by pointing
+            # the import map at the CDN the CSP above just allowed.
+            logger.warning(
+                "%s is missing — falling back to the %s CDN for Lit. "
+                "Run `python -m pic_to_bin.web.vendor_lit` to restore the "
+                "self-contained build.",
+                LIT_BUNDLE, LIT_CDN_ORIGIN,
+            )
+            response.body = response.body.replace(
+                f'"{LIT_LOCAL_URL}"'.encode(), f'"{LIT_CDN_URL}"'.encode()
+            )
+            response.headers["content-length"] = str(len(response.body))
+        return response
 
     @app.get("/download/fusion-addin.zip")
     async def download_fusion_addin() -> Response:

@@ -1,0 +1,3 @@
+# Vendored third-party bundle: keep it byte-identical to the upstream file so
+# re-running `python -m pic_to_bin.web.vendor_lit` never shows a spurious diff.
+pic_to_bin/web/static/lit-all.min.js -text

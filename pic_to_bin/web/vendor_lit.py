@@ -1,83 +1,67 @@
-"""Vendor Lit locally so the web app has no third-party runtime dependency.
+"""(Re)download the vendored Lit bundle used by the web app.
 
 Usage::
 
     python -m pic_to_bin.web.vendor_lit
 
-Downloads ``lit-all`` from a CDN into ``pic_to_bin/web/static/`` and rewrites
-the import map in ``index.html`` to point at the local copy. Idempotent —
-running it again just refreshes the file at the pinned version.
+``static/lit-all.min.js`` ships with the package, so you normally never need
+this — the browser loads Lit from your own origin, which is what the server's
+Content-Security-Policy allows. Run this only to restore the file if it went
+missing, or to move to a new pinned ``LIT_VERSION``.
 
-If your machine cannot reach the CDN, manually save ``lit-all.min.js`` from
-https://cdn.jsdelivr.net/npm/lit@3.2.1/+esm into the static dir and re-run
-this script — it will detect the existing file and just rewrite the import
-map.
+The download is the official pre-bundled build from the ``lit/dist`` repo. It
+is genuinely self-contained: unlike jsdelivr's ``/npm/lit/+esm`` (a ~500 byte
+stub that re-imports the real modules from the CDN at runtime), nothing in
+this file reaches back out to the network.
+
+Offline? Save the file at ``LIT_URL`` by hand into the static dir — that is
+all this script does.
+
+Note: the bundle exports Lit's core and directives but *not*
+``lit/decorators.js``; ``app.js`` uses plain class fields with
+``static properties`` instead of decorators.
 """
 
 from __future__ import annotations
 
-import re
 import sys
 import urllib.request
 from pathlib import Path
 
 LIT_VERSION = "3.2.1"
-LIT_URL = f"https://cdn.jsdelivr.net/npm/lit@{LIT_VERSION}/+esm"
-DECORATORS_URL = f"https://cdn.jsdelivr.net/npm/lit@{LIT_VERSION}/decorators.js/+esm"
+LIT_URL = f"https://cdn.jsdelivr.net/gh/lit/dist@{LIT_VERSION}/all/lit-all.min.js"
 
 STATIC_DIR = Path(__file__).parent / "static"
-INDEX_PATH = STATIC_DIR / "index.html"
-
-
-def _download(url: str, target: Path) -> None:
-    print(f"  fetching {url}")
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        target.write_bytes(resp.read())
-    print(f"  wrote {target} ({target.stat().st_size:,} bytes)")
-
-
-def _rewrite_importmap(local: bool) -> None:
-    text = INDEX_PATH.read_text(encoding="utf-8")
-    if local:
-        new_imports = (
-            '"lit": "/static/lit-all.min.js",\n'
-            '        "lit/decorators.js": "/static/lit-decorators.js"'
-        )
-    else:
-        new_imports = (
-            f'"lit": "https://esm.sh/lit@{LIT_VERSION}",\n'
-            f'        "lit/decorators.js": "https://esm.sh/lit@{LIT_VERSION}/decorators.js"'
-        )
-    pattern = re.compile(
-        r'"lit":\s*"[^"]*",\s*\n\s*"lit/decorators\.js":\s*"[^"]*"',
-        re.MULTILINE,
-    )
-    new_text, n = pattern.subn(new_imports, text)
-    if n == 0:
-        print("WARN: import map block not found in index.html — leaving file unchanged.")
-        return
-    INDEX_PATH.write_text(new_text, encoding="utf-8")
-    print(f"  updated import map in {INDEX_PATH} -> {'local' if local else 'CDN'}")
+TARGET = STATIC_DIR / "lit-all.min.js"
 
 
 def main() -> int:
-    target_lit = STATIC_DIR / "lit-all.min.js"
-    target_decorators = STATIC_DIR / "lit-decorators.js"
+    print(f"  fetching {LIT_URL}")
     try:
-        _download(LIT_URL, target_lit)
-        _download(DECORATORS_URL, target_decorators)
+        with urllib.request.urlopen(LIT_URL, timeout=30) as resp:
+            data = resp.read()
     except Exception as e:  # noqa: BLE001
         print(f"ERROR downloading Lit: {e}", file=sys.stderr)
+        print(f"Save {LIT_URL}\ninto {TARGET} by hand instead.", file=sys.stderr)
+        return 1
+
+    if b"export{" not in data:
         print(
-            "Save the files manually from\n"
-            f"  {LIT_URL}\n"
-            f"  {DECORATORS_URL}\n"
-            f"into {STATIC_DIR} and re-run this script.",
+            f"ERROR: {LIT_URL} did not return an ES module — refusing to "
+            f"overwrite {TARGET}.",
             file=sys.stderr,
         )
         return 1
-    _rewrite_importmap(local=True)
-    print("\nDone. Restart the server (or just reload the browser).")
+
+    # Drop the source-map comment: we don't ship the .map, and leaving the
+    # pointer only earns a 404 whenever someone opens devtools.
+    lines = [
+        ln for ln in data.split(b"\n")
+        if not ln.startswith(b"//# sourceMappingURL=")
+    ]
+    TARGET.write_bytes(b"\n".join(lines))
+    print(f"  wrote {TARGET} ({TARGET.stat().st_size:,} bytes)")
+    print("\nDone. Reload the browser.")
     return 0
 
 

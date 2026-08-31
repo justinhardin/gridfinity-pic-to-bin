@@ -8,20 +8,22 @@
   <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon-64.png">
   <link rel="stylesheet" href="/static/styles.css">
   <!--
-    Lit is loaded via this import map.
+    Lit is vendored locally in /static/lit-all.min.js (the official pinned
+    lit/dist bundle) so the app has no third-party runtime dependency: it
+    loads offline and under the server's strict Content-Security-Policy.
 
-    Default: CDN (https://esm.sh) so the app works without any extra setup.
-
-    To vendor Lit locally (no third-party dependency at runtime), run:
+    Refresh / re-download the bundle with:
         python -m pic_to_bin.web.vendor_lit
-    That command downloads lit-all.min.js into pic_to_bin/web/static/ and
-    rewrites this import map to "/static/lit-all.min.js".
+
+    If that file is ever missing, the server rewrites this import map to the
+    esm.sh CDN when it serves the page and widens the CSP to match, so the
+    app still loads. Note the bundle has no `lit/decorators.js` export —
+    app.js uses plain class fields and `static properties`.
   -->
   <script type="importmap">
     {
       "imports": {
-        "lit": "https://esm.sh/lit@3.2.1",
-        "lit/decorators.js": "https://esm.sh/lit@3.2.1/decorators.js"
+        "lit": "/static/lit-all.min.js"
       }
     }
   </script>

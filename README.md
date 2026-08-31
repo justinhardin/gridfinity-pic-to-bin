@@ -556,7 +556,9 @@ The browser back button navigates between screens (form → progress → preview
 → downloads). The form fields all have an `(i)` info button next to their
 label that opens a modal with a multi-paragraph explanation.
 
-To replace the default `esm.sh` Lit import with a vendored local copy:
+Lit is vendored inside the package (`pic_to_bin/web/static/lit-all.min.js`),
+so the page loads with no CDN request and works offline. To re-download it
+after deleting it, or to bump the pinned version:
 
 ```bash
 python -m pic_to_bin.web.vendor_lit
