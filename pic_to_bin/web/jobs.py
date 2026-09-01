@@ -507,9 +507,17 @@ class JobManager:
         /jobs/{id}/overlays/{stem}`` so the verdict card can display the
         same overlay images the model judged.
         """
-        # Local import keeps `anthropic` out of the module-level deps,
-        # so non-LLM tests still load pic_to_bin.web.jobs cleanly.
-        from pic_to_bin.web.llm_check import LLMVerdict, evaluate_layout
+        # Local import keeps `anthropic` out of the module-level deps, so
+        # non-LLM tests still load pic_to_bin.web.jobs cleanly — and the SDK
+        # is the one dependency that stayed optional, so say so plainly
+        # rather than surfacing a bare ImportError as a 500.
+        try:
+            from pic_to_bin.web.llm_check import LLMVerdict, evaluate_layout
+        except ImportError as exc:
+            raise RuntimeError(
+                "The LLM fit-check needs the anthropic SDK: "
+                'pip install "gridfinity-pic-to-bin[llm]"'
+            ) from exc
         from pic_to_bin.web.overlay import generate_overlay_image
 
         if not self.anthropic_api_key:

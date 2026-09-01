@@ -25,7 +25,9 @@ layout_preview.png            <- low-res preview
 bin_config.json               <- written after Phase B
 ```
 
-To run: `pip install -e ".[web]"` then `pic-to-bin-web --port 8000`.
+To run: `pip install -e .` then `pic-to-bin-web --port 8000`. The serving
+dependencies are core; only the opt-in LLM review needs an extra
+(`pip install -e ".[llm]"`).
 
 ## Public Hosting & Security Hardening
 

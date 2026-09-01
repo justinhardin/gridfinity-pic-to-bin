@@ -49,6 +49,15 @@ dependencies = [
     "potracer",
     "pillow-heif",
     "Pillow",
+    # Web app. Core rather than an extra: `pic-to-bin-web` is a headline
+    # feature, these are small pure-Python packages next to the multi-GB
+    # torch download core already pulls, and making them optional meant a
+    # plain install shipped a console script that could not start.
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "sse-starlette",
+    "python-dotenv",
 ]
 
 [project.urls]
@@ -61,18 +70,22 @@ dev = [
     "pytest",
     "httpx",
 ]
-web = [
-    "fastapi",
-    "uvicorn[standard]",
-    "python-multipart",
-    "sse-starlette",
+# The "check with LLM" feature only. It is opt-in (--enable-llm), bills a
+# real Anthropic account per call, and adds an outbound network dependency,
+# so it stays out of the default install.
+llm = [
     "anthropic",
-    "python-dotenv",
+]
+# Compatibility alias: `pip install "gridfinity-pic-to-bin[web]"` was the
+# documented install before the web deps became core. Resolves to [llm] so
+# older instructions keep working instead of warning about a missing extra.
+web = [
+    "anthropic",
 ]
 
 [project.scripts]
 pic-to-bin = "pic_to_bin.pipeline:main"
-pic-to-bin-web = "pic_to_bin.web.server:cli"
+pic-to-bin-web = "pic_to_bin.web.launcher:main"
 generate-phone-template = "pic_to_bin.phone_template:main"
 preprocess-phone = "pic_to_bin.phone_preprocess:main"
 trace-tool = "pic_to_bin.trace_tool:main"

@@ -34,7 +34,7 @@ A printed ArUco marker template handles perspective correction and automatic sca
 ## Quick start
 
 1. **[Install the pipeline](#installation)** —
-   `pipx install "gridfinity-pic-to-bin[web]"`. One command, and it covers all
+   `pipx install gridfinity-pic-to-bin`. One command, and it covers all
    three pieces: the CLI, the [web app](#2-the-web-app), and the bundled
    [Fusion 360 add-in](#3-the-fusion-360-add-in).
 2. **[Print the ArUco template](#step-1-print-the-template)** —
@@ -62,8 +62,13 @@ drag-and-drop upload, live progress, and a layout preview — see
 **Recommended — one command:**
 
 ```bash
-pipx install "gridfinity-pic-to-bin[web]"
+pipx install gridfinity-pic-to-bin
 ```
+
+No extras, no second step: the web app's dependencies are part of the base
+package. (Earlier releases put them behind a `[web]` extra. That still
+resolves, so old instructions keep working — it just no longer adds anything
+the plain install lacks.)
 
 [pipx](https://pipx.pypa.io/) is the standard installer for Python
 *applications* — as opposed to libraries you `import`. It builds a private
@@ -79,29 +84,29 @@ That single command covers all three pieces of the project:
 | # | What | How you get it |
 |---|------|----------------|
 | 1 | **The core code** — the pipeline that turns photos into a bin config | Always installed |
-| 2 | **The web app** — browser frontend over the same pipeline | Included, via the `[web]` extra above |
+| 2 | **The web app** — browser frontend over the same pipeline | Always installed |
 | 3 | **The Fusion 360 add-in** — turns the bin config into a solid model | Ships inside the package; run `pic-to-bin-fusion install` once to copy it into Fusion 360 |
 
-There is no second install to run. The `[web]` extra is a superset of the
-core install, and the Fusion add-in is bundled in the package itself —
-`pic-to-bin-fusion install` is a file copy into Fusion 360's own add-ins
-folder, not a download.
+There is no second install to run. `pic-to-bin` and `pic-to-bin-web` both
+come from that one command, and the Fusion add-in is bundled in the package
+itself — `pic-to-bin-fusion install` is a file copy into Fusion 360's own
+add-ins folder, not a download.
 
-**The `[web]` part of that command does matter, though.** The web app's
-*code* ships in the base package either way, so `pic-to-bin-web` appears on
-your `PATH` even without the extra — but its server dependencies (`fastapi`,
-`uvicorn`, …) arrive only with `[web]`, and without them the command exits
-immediately with `ModuleNotFoundError: No module named 'fastapi'`. If you
-already installed without the extra, add it in place:
+The server dependencies (`fastapi`, `uvicorn`, …) are a handful of small
+pure-Python packages next to the multi-GB PyTorch download that dominates the
+install either way, so there is nothing to save by leaving them out.
+
+One feature is still optional: the **"check with LLM"** fit review, which
+calls the Anthropic API and bills your account per call. It is off unless you
+pass `--enable-llm`, and its SDK installs separately:
 
 ```bash
-pipx install --force "gridfinity-pic-to-bin[web]"
+pipx install --force "gridfinity-pic-to-bin[llm]"
 ```
 
-Want the CLI only, on a machine that will never serve a browser UI? Use
-`pipx install gridfinity-pic-to-bin`. The extra adds only a handful of small
-pure-Python packages next to the multi-GB PyTorch download that dominates the
-install either way, which is why `[web]` is the recommended default.
+Keep those quotes — zsh, the default shell on macOS, reads `[llm]` as a glob
+pattern and answers `zsh: no matches found` before pipx ever runs. The quotes
+are harmless in bash, so quote it everywhere.
 
 Install from wherever you like — but **where you later run the commands does
 matter**; see [Where to run these commands](#where-to-run-these-commands).
@@ -128,13 +133,12 @@ installs, on your `PATH`.
 
 pipx builds each app's environment with your default Python. This package
 needs **Python 3.10 or newer**; if your default is older, point pipx at a
-newer one: `pipx install --python 3.12 "gridfinity-pic-to-bin[web]"`.
+newer one: `pipx install --python 3.12 gridfinity-pic-to-bin`.
 
 ### 1. The core code
 
 ```bash
-pipx install "gridfinity-pic-to-bin[web]"   # recommended: core + web app
-pipx install gridfinity-pic-to-bin          # core only
+pipx install gridfinity-pic-to-bin
 ```
 
 Everything that actually does the work: ArUco template generation, photo
@@ -159,18 +163,19 @@ It gives you these commands:
 
 Dependencies (installed automatically): `ultralytics` (SAM2),
 `opencv-python`, `numpy`, `ezdxf`, `potracer`, `pyclipper`, `matplotlib`,
-`Pillow`, `pillow-heif`.
+`Pillow`, `pillow-heif`, plus the web app's `fastapi`, `uvicorn[standard]`,
+`python-multipart`, `sse-starlette`, and `python-dotenv`.
 
 ### 2. The web app
 
 ```bash
-pipx install "gridfinity-pic-to-bin[web]"   # the same single install as above
-pic-to-bin-web --port 8000                  # http://localhost:8000
+pipx install gridfinity-pic-to-bin   # the same single install as above
+pic-to-bin-web --port 8000           # http://localhost:8000
 ```
 
-This is not a second installation — it is the one package with its `[web]`
-extra. Already installed without the extra? `pipx install --force
-"gridfinity-pic-to-bin[web]"` adds it without disturbing anything else.
+This is not a second installation — it is the same package. The server and
+its dependencies come with the core install, so if `pic-to-bin` works,
+`pic-to-bin-web` works.
 
 A FastAPI server plus a Lit frontend layered on top of the core code. It
 does **not** reimplement the pipeline — it calls the same `run_pipeline()`
@@ -188,12 +193,11 @@ Install it if:
   per-job UUID directories, a GPU semaphore so concurrent jobs queue instead
   of fighting over SAM2, and a TTL sweep for old jobs.
 
-Extra dependencies pulled in by `[web]`: `fastapi`, `uvicorn[standard]`,
-`python-multipart`, `sse-starlette`, `anthropic`, `python-dotenv`. Those
-dependencies are the *only* thing the extra adds — the web app's own code and
-static assets are already in the base package. That is why `pic-to-bin-web`
-exists on your `PATH` after a plain install but fails with
-`ModuleNotFoundError: No module named 'fastapi'` until you add `[web]`.
+Serving dependencies: `fastapi`, `uvicorn[standard]`, `python-multipart`,
+`sse-starlette`, `python-dotenv` — all core. The only piece held back is the
+`anthropic` SDK for the opt-in "check with LLM" review; add it with
+`pipx install --force "gridfinity-pic-to-bin[llm]"` if you plan to pass
+`--enable-llm`.
 
 See [Web app](#web-app-browser-frontend) below for usage, and
 `pic_to_bin/web/README.md` for hosting it behind a public reverse proxy.
@@ -250,7 +254,7 @@ from there.
 **Windows — PowerShell, *not* "Run as Administrator":**
 
 ```powershell
-pipx install "gridfinity-pic-to-bin[web]"   # once, from anywhere
+pipx install gridfinity-pic-to-bin   # once, from anywhere
 mkdir $HOME\pic-to-bin
 cd $HOME\pic-to-bin                         # then work from here
 ```
@@ -260,7 +264,7 @@ cd $HOME\pic-to-bin                         # then work from here
 **macOS — Terminal:**
 
 ```bash
-pipx install "gridfinity-pic-to-bin[web]"   # once, from anywhere
+pipx install gridfinity-pic-to-bin   # once, from anywhere
 mkdir -p ~/pic-to-bin
 cd ~/pic-to-bin                             # then work from here
 ```
@@ -329,7 +333,7 @@ For a venv install, replace the `pipx install` line with the usual three:
 ```bash
 python3 -m venv .venv          # Windows: py -m venv .venv
 source .venv/bin/activate      # Windows: .\.venv\Scripts\Activate.ps1
-pip install "gridfinity-pic-to-bin[web]"
+pip install gridfinity-pic-to-bin
 ```
 
 On Windows, if `Activate.ps1` is blocked by execution policy, run
@@ -345,13 +349,13 @@ Further reading:
 ### Upgrading and uninstalling
 
 ```bash
-pipx upgrade gridfinity-pic-to-bin      # keeps the extras you installed with
+pipx upgrade gridfinity-pic-to-bin      # keeps the spec you installed with
 pipx uninstall gridfinity-pic-to-bin    # removes the package and every dependency
 ```
 
-pipx records the exact spec you installed — including `[web]` — so
-`pipx upgrade` keeps the web app. To change your mind about the extra, use
-`pipx install --force` with the spec you want.
+pipx records the exact spec you installed — including any extras — so
+`pipx upgrade` preserves it. To change the spec later (adding `[llm]`, say),
+use `pipx install --force` with the one you want.
 
 Two things live outside the package and are not touched by either command:
 
@@ -374,7 +378,7 @@ git clone https://github.com/justinhardin/gridfinity-pic-to-bin.git
 cd gridfinity-pic-to-bin
 python3 -m venv .venv          # optional; Windows: py -m venv .venv
 source .venv/bin/activate      # optional; Windows: .\.venv\Scripts\Activate.ps1
-pip install -e ".[web]"        # or ".[dev]" / "." for core only
+pip install -e .               # add ".[dev]" for the test deps
 ```
 
 An editable install still runs from anywhere, so you can keep the checkout
@@ -544,7 +548,7 @@ ready: per-job UUID directories, GPU semaphore around SAM2 so concurrent submiss
 queue rather than fight over the GPU, SSE-streamed progress.
 
 ```bash
-pipx install "gridfinity-pic-to-bin[web]"     # from a checkout: pip install -e ".[web]"
+pipx install gridfinity-pic-to-bin     # from a checkout: pip install -e .
 pic-to-bin-web --port 8000
 ```
 
@@ -630,15 +634,6 @@ This copies the add-in to `…/API/AddIns/pic_to_bin/` and the script to `…/AP
 5. Click the button. The script auto-loads `<project>/generated/bin_config.json` if it exists; otherwise a file dialog opens defaulting to your Desktop.
 6. Bin gets built, exported as STL + STEP, and a viewport screenshot is saved alongside `bin_config.json`.
 
-### Script form (alternate)
-
-If you prefer the classic Scripts dialog:
-
-1. Press **Shift+S → Scripts tab**.
-2. Select **pic_to_bin → Run**.
-
-The behavior is identical to the add-in button.
-
 ### What gets built
 
 The bin is generated in a fresh document with these timeline groups for easy navigation:
@@ -652,7 +647,7 @@ The bin is generated in a fresh document with these timeline groups for easy nav
 
 ### Reinstalling and reload
 
-Re-running `pic-to-bin-fusion install` overwrites both folders. The script and add-in entry points reload `_bin_builder.py` from disk on every invocation, so most code changes land on the next button click without restarting Fusion. Only changes to the entry-point files themselves (`pic_to_bin_script/pic_to_bin.py` or `pic_to_bin_addin/pic_to_bin.py`) require a Stop/Run on the add-in or a Fusion restart.
+Re-running `pic-to-bin-fusion install` overwrites the add-in folder. The add-in entry point reloads `_bin_builder.py` from disk on every invocation, so most code changes land on the next button click without restarting Fusion. Only changes to the entry-point file itself (`pic_to_bin_addin/pic_to_bin.py`) require a Stop/Run on the add-in or a Fusion restart.
 
 ### Uninstall
 
@@ -660,7 +655,8 @@ Re-running `pic-to-bin-fusion install` overwrites both folders. The script and a
 pic-to-bin-fusion uninstall
 ```
 
-Removes both the script and the add-in.
+Removes the add-in, plus the `Scripts/pic_to_bin` folder left behind by
+versions that installed a separate script entry point.
 
 ---
 
@@ -672,6 +668,9 @@ Removes both the script and the add-in.
 | `MarkerDetectionError: Only N markers (need ≥3)` | Markers obscured or overexposed | Improve lighting; don't cover markers with tool |
 | `ScaleInconsistencyError: H/V scales differ >5%` | Template not printed at 100% | Reprint with fit-to-page disabled |
 | `WARNING: Low effective DPI (<100)` | Camera too far away | Hold phone closer; use higher resolution mode |
+| `zsh: no matches found: gridfinity-pic-to-bin[llm]` | zsh globbed the extras bracket | Quote the spec: `pipx install --force "gridfinity-pic-to-bin[llm]"` |
+| `pic-to-bin-web` says it could not import its web dependencies | Install predates the release that made them core, or was pruned | `pipx install --force gridfinity-pic-to-bin` |
+| `--enable-llm` exits saying the anthropic SDK is missing | The LLM review is the one optional extra | `pipx install --force "gridfinity-pic-to-bin[llm]"`, or drop the flag |
 | Tools don't fit in grid | Tools too large for `--max-units` | Increase `--max-units` |
 | Fusion freezes building pockets | Stale cached `_bin_builder` after editing | The reload is already wired in — just click the button again. If still stuck, restart Fusion. |
 | Pocket fits too loose | Default `--tolerance 0` produces 2 mm physical clearance + ≥2 mm at each tip | Lower with `--tolerance -0.5` and/or `--axial-tolerance 1.0` |

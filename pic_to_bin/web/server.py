@@ -925,13 +925,14 @@ async def _periodic_sweep(job_manager: JobManager, interval_seconds: float = 180
 
 def cli() -> None:
     """Console-script entry point: ``pic-to-bin-web``."""
+    import importlib.util
     import os
 
     import uvicorn
 
-    # Pull a `.env` from the CWD before reading env vars. python-dotenv is
-    # an optional dep (only installed with the `[web]` extras) so the
-    # import is local.
+    # Pull a `.env` from the CWD before reading env vars. Tolerate a missing
+    # python-dotenv: it is a core dependency now, but installs that predate
+    # that (or were pruned by hand) should still start.
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -973,6 +974,17 @@ def cli() -> None:
     # dependency.
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY") or None
     enable_llm = bool(args.enable_llm)
+    if enable_llm and importlib.util.find_spec("anthropic") is None:
+        # The SDK is the one dependency that stayed optional. Fail here
+        # rather than at the first /jobs/{id}/llm-check request, which
+        # would otherwise be the first sign that the flag did nothing.
+        raise SystemExit(
+            "--enable-llm needs the anthropic SDK, which is not installed.\n\n"
+            '    pipx install --force "gridfinity-pic-to-bin[llm]"\n'
+            '    pip install "gridfinity-pic-to-bin[llm]"\n\n'
+            "Keep the quotes — zsh reads the brackets as a glob pattern.\n"
+            "Drop --enable-llm to serve without the LLM fit-check."
+        )
     if enable_llm and anthropic_api_key:
         logger.info("LLM fit-check ENABLED (ANTHROPIC_API_KEY present + --enable-llm)")
     elif anthropic_api_key and not enable_llm:
