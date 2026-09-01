@@ -105,6 +105,7 @@ include = [
     "/pic_to_bin",
     "/tests",
     "/README.md",
+    "/GUIDE.md",
     "/LICENSE.md",
     "/pyproject.toml",
 ]
