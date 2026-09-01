@@ -1,17 +1,20 @@
 # Gridfinity Pic-to-Bin — Phone Camera to Gridfinity Bin
 
-## Current state (2026-05-01 EOD)
+## Current state (2026-08-31)
 
-Active branch: **`web-app`** (HEAD `e4782f1`). Pushed to `origin/web-app` —
-the master branch is unchanged from before the web work started. To resume:
+Everything below is on **`master`** and published to PyPI (v0.2.1 was the
+first release with the web fixes). The web work has long since merged.
 
 ```bash
-git checkout web-app
-pip install -e ".[web]"          # pulls fastapi, uvicorn[standard], sse-starlette, python-multipart
+pip install -e .                 # web deps are core, no extra needed
 pic-to-bin-web --port 8000       # http://localhost:8000
 ```
 
-**What's working end-to-end on `web-app`:**
+Installing: `pipx install gridfinity-pic-to-bin`. The `[web]` extra is now a
+compatibility alias pointing at `[llm]` (the `anthropic` SDK for the opt-in
+fit review) — it exists so older documented commands keep resolving.
+
+**What's working end-to-end:**
 - CLI pipeline (`pic-to-bin`) plus Python-callable `pipeline.run_pipeline()`
   with progress callbacks and a `stop_after="layout"` checkpoint.
 - FastAPI web wrapper (`pic_to_bin/web/`) with multi-user job queue, SSE
@@ -70,7 +73,7 @@ OR:     Web app (pic_to_bin/web/) — FastAPI + Lit
 
 ```
 gridfinity-pic-to-bin/
-    pyproject.toml                   # [web] optional dep group; pic-to-bin-web script
+    pyproject.toml                   # core deps incl. the web stack; [llm]/[web] extras
     pic_to_bin/                      # Python package
         __init__.py
         phone_template.py            # ArUco template PDF generation
@@ -87,6 +90,7 @@ gridfinity-pic-to-bin/
             __init__.py
             jobs.py                  # JobManager: UUID registry, GPU semaphore, SSE
             server.py                # FastAPI routes + uvicorn cli() + Fusion ZIP builder
+            launcher.py              # pic-to-bin-web entry point; explains missing web deps
             vendor_lit.py            # `python -m … vendor_lit` re-downloads static/lit-all.min.js
             static/
                 lit-all.min.js       # Vendored Lit 3.2.1 (committed; no CDN at runtime)
@@ -127,6 +131,7 @@ gridfinity-pic-to-bin/
 | `layout_tools.py` | Layout packing + `generate_preview` (PNG) + `generate_fit_test_drawing` (PDF/SVG at 1:1 mm scale for printing) |
 | `prepare_bin.py` | Centers the combined cutout in the bin, writes Fusion JSON config |
 | `web/jobs.py` | `JobManager`: UUID registry, ThreadPoolExecutor, GPU semaphore around SAM2, async SSE event fan-out, TTL sweep |
+| `web/launcher.py` | `pic-to-bin-web` console script. Imports nothing from the web stack, so an install missing it gets repair instructions instead of an ImportError traceback; any other ImportError is re-raised |
 | `web/server.py` | FastAPI routes + `pic-to-bin-web` uvicorn launcher; whitelisted artifact serving. `_build_fusion_addin_zip()` bundles `pic_to_bin_addin/` + `installers/` into `AddIns/pic_to_bin` on each `/download/fusion-addin.zip` request — it reads those dirs off disk, so renaming either one breaks the endpoint at request time |
 | `web/static/app.js` | Lit components: `pic-app` (root, owns modal + history), `pic-form`, `pic-progress`, `pic-preview` (with fit-test card), `pic-downloads`. `FIELD_INFO` map drives the (i) info modals |
 | `web/vendor_lit.py` | `python -m pic_to_bin.web.vendor_lit` re-downloads the vendored `static/lit-all.min.js` (pinned `lit/dist` bundle). Only needed to restore a deleted file or bump the version |
@@ -211,7 +216,7 @@ prepare-bin generated/combined_layout.dxf --tool-height 17.0
 pic-to-bin-fusion install
 
 # Web app (multi-user; FastAPI + Lit frontend)
-pip install -e ".[web]"
+pip install -e .
 pic-to-bin-web --port 8000           # opens at http://localhost:8000
 python -m pic_to_bin.web.vendor_lit  # only to refresh the vendored Lit bundle
 
@@ -298,8 +303,14 @@ Core (always installed):
 - `potracer`, `svgpathtools`, `ezdxf`, `pyclipper`, `matplotlib`
 - `Pillow`, `pillow-heif`
 
-Web (`pip install -e ".[web]"`):
-- `fastapi`, `uvicorn[standard]`, `python-multipart`, `sse-starlette`
+Web (core since the web deps moved out of the extra):
+- `fastapi`, `uvicorn[standard]`, `python-multipart`, `sse-starlette`,
+  `python-dotenv`
+
+LLM fit-check only (`pip install -e ".[llm]"`, alias `".[web]"`):
+- `anthropic` — opt-in via `--enable-llm`; `cli()` exits with install
+  instructions if the flag is passed without it, and `JobManager` raises a
+  RuntimeError naming the extra rather than a bare ImportError
 
 Dev (`pip install -e ".[dev]"`):
 - `pytest`, `httpx`
