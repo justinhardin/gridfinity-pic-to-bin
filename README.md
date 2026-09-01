@@ -13,7 +13,12 @@ gridfinity bin with a pocket cut to the tool's exact shape.
 
 ```bash
 pipx install gridfinity-pic-to-bin
+pic-to-bin-fusion install
 ```
+
+The second command adds a **Gridfinity Pic-to-Bin** button under **Solid →
+Create** in Fusion 360 — that's what turns the result into a solid model
+([enable it with Shift+S →](https://github.com/justinhardin/gridfinity-pic-to-bin/blob/master/GUIDE.md#installing-the-add-in)).
 
 No pipx yet? `py -m pip install --user pipx; py -m pipx ensurepath` (Windows)
 or `brew install pipx && pipx ensurepath` (macOS) — then open a new terminal.
@@ -46,21 +51,16 @@ pic-to-bin-web --port 8000
 Run it from a dedicated folder — output and the SAM2 model weights (several
 hundred MB, downloaded on the first trace) land in the current directory.
 
+### 5. Use it
+
 Open **http://localhost:8000**, drag in the photo, enter the tool depth, and
 submit. You get a layout preview, a **1:1 fit-test PDF** to print and lay the
-real tool on, and a `bin_config.json`.
+real tool on to check the fit, and a `bin_config.json`.
 
-### 5. Build the bin
-
-```bash
-pic-to-bin-fusion install
-```
-
-Adds a **Gridfinity Pic-to-Bin** button under **Solid → Create** in Fusion
-360 ([enable it with Shift+S →](https://github.com/justinhardin/gridfinity-pic-to-bin/blob/master/GUIDE.md#installing-the-add-in)).
-Point it at `bin_config.json` and it builds the whole parametric bin — body,
-pockets, finger slots, stacking lip, gridfinity base pads. Export STL and
-print.
+Then in Fusion 360, click **Solid → Create → Gridfinity Pic-to-Bin** and
+point it at that `bin_config.json`. It builds the whole parametric bin —
+body, pockets, finger slots, stacking lip, gridfinity base pads. Export STL
+and print.
 
 ---
 
