@@ -48,7 +48,7 @@ _SHUTDOWN_SENTINEL = object()
 # Chosen to allow any modern high-resolution phone photo of the ArUco
 # template while blocking obvious abuse (100 MB RAW files, 20-photo jobs).
 MAX_IMAGE_BYTES: int = 30 * 1024 * 1024
-MAX_IMAGES_PER_JOB: int = 8
+MAX_IMAGES_PER_JOB: int = 10
 MAX_TOTAL_UPLOAD_BYTES: int = 120 * 1024 * 1024
 
 

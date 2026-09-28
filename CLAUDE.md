@@ -29,7 +29,7 @@ fit review) — it exists so older documented commands keep resolving.
 
 **Last session's open thread:** none — everything committed and tested
 (>100 passing). Security hardening complete for public hosting:
-- 30 MiB / 8 photo / 120 MiB upload limits + client-side guards
+- 30 MiB / 10 photo / 120 MiB upload limits + client-side guards
 - "check with LLM" feature is now opt-in only (`--enable-llm` / `PIC_TO_BIN_ENABLE_LLM`); disabled by default with clear warnings
 - Security headers (CSP, X-Frame-Options, etc.) + hardened error handler
 - Server-side param validation + defensive checks in JobManager

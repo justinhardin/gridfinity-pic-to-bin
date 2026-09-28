@@ -45,7 +45,7 @@ pic-to-bin-web \
 ```
 
 - `--enable-llm` / `PIC_TO_BIN_ENABLE_LLM=1` is **off by default**. The "Check with LLM" button and `/llm_evaluate` endpoint are completely disabled (returns 503). This eliminates per-transaction Anthropic costs and any outbound network calls from the server process.
-- Short TTL (6 h) + 30 MiB / 8 photo / 120 MiB total hard limits prevent disk-filling attacks.
+- Short TTL (6 h) + 30 MiB / 10 photo / 120 MiB total hard limits prevent disk-filling attacks.
 - All numeric parameters are range-checked on the server before the pipeline runs.
 
 ### NGINX recommended snippet (TLS termination + rate limiting)
@@ -70,7 +70,7 @@ server {
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-ancestors 'none';" always;
 
     # Size & rate limits (protects before the app sees the request)
-    client_max_body_size 150m;          # 8×30 MiB + overhead
+    client_max_body_size 150m;          # 120 MiB total-upload cap + overhead
     limit_req_zone $binary_remote_addr zone=job:10m rate=8r/m;   # 8 jobs per minute per IP
     limit_req_zone $binary_remote_addr zone=preview:10m rate=30r/m;
 
@@ -109,7 +109,7 @@ Use `mod_proxy`, `mod_proxy_http`, `mod_ratelimit`, `LimitRequestBody 157286400`
 
 ### What the hardening protects against
 
-- **Resource exhaustion / DoS**: 30 MiB per photo, 8 photos max, 120 MiB total per job. NGINX `client_max_body_size` + app-level 413 before any disk write. GPU/CPU work only happens for valid small jobs.
+- **Resource exhaustion / DoS**: 30 MiB per photo, 10 photos max, 120 MiB total per job. NGINX `client_max_body_size` + app-level 413 before any disk write. GPU/CPU work only happens for valid small jobs.
 - **LLM cost abuse**: Completely disabled on public instances. Even an env var leak does nothing unless `--enable-llm` is also passed.
 - **Path traversal / file disclosure**: UUID job dirs + strict whitelists for artifacts, inputs, and overlays. No user-controlled paths reach the filesystem.
 - **Information leaks**: Exception handler returns only a generic message; full tracebacks stay in logs.

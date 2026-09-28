@@ -35,7 +35,7 @@ const FORM_DEFAULTS = {
 // 30 MiB per file lets any modern phone photo of the template through
 // while stopping obvious abuse before it wastes bandwidth or hits the 413.
 const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30 MiB
-const MAX_FILES = 8;
+const MAX_FILES = 10;
 
 // Which fields, when changed on a redo, force a re-trace (expensive).
 // Everything else is layout-only (cheap; cached DXFs reused).

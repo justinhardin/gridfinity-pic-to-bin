@@ -6,7 +6,7 @@ GET  /                          → static home.html (marketing / instructions)
 GET  /app                       → static index.html (the Lit app)
 GET  /download/fusion-addin.zip → zipped Fusion 360 script+add-in for manual install
 GET  /static/{path}             → static assets (JS, CSS, vendored Lit)
-POST /jobs                      → create job (multipart: images + JSON params; 30 MiB/photo, 8 photos, 120 MiB total)
+POST /jobs                      → create job (multipart: images + JSON params; 30 MiB/photo, 10 photos, 120 MiB total)
 GET  /jobs/{id}                 → job summary (status, artifact URLs)
 GET  /jobs/{id}/events          → SSE stream of progress events
 POST /jobs/{id}/proceed         → run Phase B (bin_config.json)
